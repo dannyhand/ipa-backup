@@ -1,0 +1,67 @@
+# IPA Backup
+
+Back up the apps on an old iPod touch, iPhone or iPad to your Android phone over a USB cable,
+with no computer, no root on the phone, and no jailbreak needed on the iOS device.
+
+Built to rescue App Store games that are long gone from the store, from an iPod touch 4th gen on iOS 6.1.6.
+
+## Features
+
+- **Back up apps as `.ipa` files** to `Download/IPA Backup/`, one at a time or all at once
+- **Skips apps you've already saved**, so reruns only pick up what's new (✓ marks saved apps)
+- **Optional app data backup:** each app's `Documents/` and `Library/` (saves, settings) as a separate `… data.zip`
+- **Jailbroken devices (AFC2):** if archiving fails, the app bundle is copied straight from the filesystem.
+  **Browse files** shows the whole filesystem and saves any file or folder.
+- **Non-jailbroken devices:** Browse files shows the media folder (`/var/mobile/Media`)
+- Your apps stay installed on the device. The archive is made with `SkipUninstall`.
+
+## Requirements
+
+- An Android phone with USB host (OTG) support, Android 7.0 or newer
+- A USB OTG adapter and an Apple 30-pin or Lightning USB cable
+- An iOS device on **iOS 8 or older**. Apple removed app extraction in iOS 9.
+  On newer iOS, only jailbroken devices with AFC2 can back up apps (via the fallback).
+
+## Usage
+
+1. Connect the iOS device to the phone and open IPA Backup (or accept the "open with" prompt).
+2. Tap **Apps**. The first time, unlock the device; the app pairs with it like a computer would.
+3. Pick apps, or tap **Back up all**.
+
+## Notes
+
+- **App Store apps stay FairPlay-encrypted** to the Apple ID that bought them. A backup reinstalls on
+  devices signed into that account, or on jailbroken devices with AppSync. This app does not remove DRM.
+  Only back up apps you own.
+- The device needs free space for one archive at a time (about the app's size).
+- Pairing records are stored in the app's private storage. If you reset the device, the app pairs again automatically.
+
+## How it works
+
+A from-scratch Kotlin implementation of the protocols iTunes uses, talking to the device through
+Android's USB Host API:
+
+| Layer | What it does |
+|---|---|
+| `usb/` | Claims the device's usbmux USB interface (class FF/FE/02) |
+| `mux/` | usbmux v2: multiplexed TCP-like connections to services on the device |
+| `lockdown/`, `pairing/` | lockdownd: pairing (root/host/device certs), TLS session via BouncyCastle |
+| `instproxy/` | installation_proxy: Browse, Archive, RemoveArchive |
+| `afc/` | Apple File Conduit: read files and folders; zips trees |
+| `housearrest/` | house_arrest: access an app's sandbox for data backups |
+| `plist/` | XML and binary property lists |
+
+The protocol details come from the excellent [libimobiledevice](https://libimobiledevice.org) project's
+documentation and source. No code was copied.
+
+## Building
+
+Open in Android Studio, or run `./gradlew assembleDebug`. Unit tests: `./gradlew testDebugUnitTest`.
+The TLS test needs `openssl` on your PATH.
+
+Release builds are signed with a key from `keystore.properties` (local) or GitHub Actions secrets.
+Pushing a tag like `v1.0` builds a signed APK and publishes it on the Releases page.
+
+## License
+
+MIT

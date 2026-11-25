@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- iPod outline with a download arrow, sized for the 108dp adaptive-icon canvas (safe zone 66dp). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- body -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M42,26h24a6,6 0 0 1 6,6v44a6,6 0 0 1 -6,6h-24a6,6 0 0 1 -6,-6v-44a6,6 0 0 1 6,-6z" />
+    <!-- screen -->
+    <path android:fillColor="#1565C0"
+        android:pathData="M40,33h28v35h-28z" />
+    <!-- home button -->
+    <path android:fillColor="#1565C0"
+        android:pathData="M54,75m-3,0a3,3 0 1 0 6,0a3,3 0 1 0 -6,0" />
+    <!-- download arrow on the screen -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M51.5,39h5v13h5.5l-8,9 -8,-9h5.5z" />
+</vector>
