@@ -1,7 +1,9 @@
 package us.dannyhand.ipabackup
 
 import android.app.Activity
-import android.app.AlertDialog
+import androidx.appcompat.app.AlertDialog
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.checkbox.MaterialCheckBox
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.ClipData
@@ -67,6 +69,23 @@ import us.dannyhand.ipabackup.personal.SafariBookmarks
 import us.dannyhand.ipabackup.personal.VCard
 import us.dannyhand.ipabackup.plist.Plist
 import us.dannyhand.ipabackup.usb.AppleUsbTransport
+import us.dannyhand.ipabackup.ui.Feature
+import us.dannyhand.ipabackup.ui.IpaBackupTheme
+import us.dannyhand.ipabackup.ui.MainScreen
+import us.dannyhand.ipabackup.ui.UiState
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.Contacts
+import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Forum
+import androidx.compose.material.icons.outlined.InstallMobile
+import androidx.compose.material.icons.outlined.LibraryMusic
+import androidx.compose.material.icons.outlined.MenuBook
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.Podcasts
 import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -101,7 +120,7 @@ import java.util.concurrent.TimeUnit
  *    clock is set again (voice memos, photos) really carries a 1970 date; that's not a parsing bug.
  *  - The phone powers the device over OTG. If the version handshake gets no reply, try a powered OTG hub.
  */
-class MainActivity : Activity() {
+class MainActivity : androidx.activity.ComponentActivity() {
 
     private companion object {
         const val ACTION_USB_PERMISSION = "us.dannyhand.ipabackup.USB_PERMISSION"
@@ -113,20 +132,20 @@ class MainActivity : Activity() {
         const val MEMOS_SUBFOLDER = "Voice Memos"
         const val BOOKS_SUBFOLDER = "Books"
         const val PERSONAL_SUBFOLDER = "Personal"
-        const val REQ_PICK_IPA = 41
-        const val MENU_COPY_LOG = 1
-        const val MENU_CLEAR_LOG = 2
         const val THUMB_PX = 200
         /** Formats we can write song info into (DRM .m4p is left untouched). */
         val TAGGABLE = setOf("m4a", "m4b", "m4r", "aac", "mp3")
     }
 
-    private lateinit var logView: TextView
-    private lateinit var scroll: ScrollView
-    private lateinit var stopButton: Button
+    /** Main-screen state (log, busy, Stop button, device) rendered by ui/MainScreen.kt. */
+    private val ui = UiState()
+    /** Most recent operation heading (log lines that start a new block), shown as the status card title. */
+    @Volatile private var lastHeadline: String? = null
     private val usbManager by lazy { getSystemService(Context.USB_SERVICE) as UsbManager }
     private val prefs by lazy { getSharedPreferences("options", Context.MODE_PRIVATE) }
-    @Volatile private var busy = false
+    private var busy: Boolean
+        get() = ui.busy
+        set(value) { ui.busy = value }
     /** What to run once USB permission is granted. */
     private var pendingAction: ((UsbDevice) -> Unit)? = null
 
@@ -149,82 +168,37 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        logView = TextView(this).apply {
-            typeface = Typeface.MONOSPACE
-            textSize = 12f
-            setTextIsSelectable(true)
-            setPadding(24, 24, 24, 24)
-        }
-        scroll = ScrollView(this).apply { addView(logView) }
+        enableEdgeToEdge()
+        // Wallpaper-based colors for the classic dialogs too (Android 12+), matching the Compose screen.
+        com.google.android.material.color.DynamicColors.applyToActivityIfAvailable(this)
+        ui.device = prefs.getString("last_device", null)
 
-        fun button(label: String, onClick: () -> Unit) = Button(this).apply {
-            text = label
-            isAllCaps = false
-            setOnClickListener { onClick() }
-        }
-        // Feature buttons, at most three per row.
-        val actions = listOf<Pair<String, (UsbDevice) -> Unit>>(
-            "Apps" to ::probe,
-            "Restore" to ::showRestorePicker,
-            "Music" to { d -> browseMusic(d, otherMedia = false) },
-            "Photos" to ::browsePhotos,
-            "Other Media" to { d -> browseMusic(d, otherMedia = true) },
-            "Voice Memos" to ::browseVoiceMemos,
-            "Books" to ::browseBooks,
-            "Messages" to ::exportMessages,
-            "Contacts & Notes" to ::exportPersonalData,
-            "Files" to ::browseFiles,
+        // Feature tiles, grouped into sections, at most three per row.
+        val features = listOf(
+            Feature("Back up apps", Icons.Outlined.Apps, "Apps") { withDevice(::probe) },
+            Feature("Restore", Icons.Outlined.InstallMobile, "Apps") { withDevice(::showRestorePicker) },
+            Feature("Music", Icons.Outlined.LibraryMusic, "Media") { withDevice { d -> browseMusic(d, otherMedia = false) } },
+            Feature("Photos", Icons.Outlined.PhotoLibrary, "Media") { withDevice(::browsePhotos) },
+            Feature("Other media", Icons.Outlined.Podcasts, "Media") { withDevice { d -> browseMusic(d, otherMedia = true) } },
+            Feature("Voice Memos", Icons.Outlined.Mic, "Media") { withDevice(::browseVoiceMemos) },
+            Feature("Books", Icons.Outlined.MenuBook, "Media") { withDevice(::browseBooks) },
+            Feature("Messages", Icons.Outlined.Forum, "Personal data", needsJailbreak = true) { withDevice(::exportMessages) },
+            Feature("Contacts & Notes", Icons.Outlined.Contacts, "Personal data", needsJailbreak = true) { withDevice(::exportPersonalData) },
+            Feature("Files", Icons.Outlined.FolderOpen, "Tools") { withDevice(::browseFiles) },
         )
-        val buttonGrid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        actions.chunked(3).forEach { row ->
-            buttonGrid.addView(LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                row.forEach { (label, action) ->
-                    addView(button(label) { withDevice(action) }, LinearLayout.LayoutParams(0, -2, 1f))
-                }
-                // Keep button widths equal on a short last row.
-                repeat(3 - row.size) { addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f)) }
-            })
-        }
-        stopButton = button("Stop…") { confirmStop() }.apply {
-            visibility = View.GONE
-            setTextColor(0xFFC62828.toInt())
-        }
-
-        // Our own toolbar (theme has no action bar), so the status-bar inset is applied exactly once.
-        val barContext = android.view.ContextThemeWrapper(this, android.R.style.ThemeOverlay_Material_Dark_ActionBar)
-        val toolbar = android.widget.Toolbar(barContext).apply {
-            title = "IPA Backup"
-            setBackgroundColor(0xFF212121.toInt())
-            popupTheme = android.R.style.ThemeOverlay_Material_Light
-            val tv = TypedValue()
-            if (theme.resolveAttribute(android.R.attr.actionBarSize, tv, true))
-                minimumHeight = TypedValue.complexToDimensionPixelSize(tv.data, resources.displayMetrics)
-        }
-        setActionBar(toolbar)
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(toolbar, LinearLayout.LayoutParams(-1, -2))
-            addView(buttonGrid)
-            addView(stopButton)
-            addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        }
-        // targetSdk 35 draws edge-to-edge: the toolbar extends under the status bar (its padding),
-        // and the bottom/side insets pad the rest.
-        root.setOnApplyWindowInsetsListener { v, insets ->
-            val (l, t, r, btm) = if (Build.VERSION.SDK_INT >= 30) {
-                val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-                listOf(bars.left, bars.top, bars.right, bars.bottom)
-            } else {
-                @Suppress("DEPRECATION")
-                listOf(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
+        val notes = mapOf("Personal data" to "needs a jailbroken device with AFC2")
+        setContent {
+            IpaBackupTheme {
+                MainScreen(
+                    state = ui,
+                    features = features,
+                    sectionNotes = notes,
+                    onCopyLog = ::copyLog,
+                    onClearLog = { ui.log.clear() },
+                    onStop = ::confirmStop,
+                )
             }
-            v.setPadding(l, 0, r, btm)
-            toolbar.setPadding(0, t, 0, 0)
-            insets
         }
-        setContentView(root)
 
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -235,21 +209,7 @@ class MainActivity : Activity() {
         }
 
         log("IPA Backup ${appVersion()}")
-        log("Connect the iPod with an OTG adapter, then tap Apps.")
         handleIntent(intent)
-    }
-
-    override fun onCreateOptionsMenu(menu: android.view.Menu): Boolean {
-        menu.add(0, MENU_COPY_LOG, 0, "Copy log")
-            .setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM or android.view.MenuItem.SHOW_AS_ACTION_WITH_TEXT)
-        menu.add(0, MENU_CLEAR_LOG, 1, "Clear log")
-        return true
-    }
-
-    override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean = when (item.itemId) {
-        MENU_COPY_LOG -> { copyLog(); true }
-        MENU_CLEAR_LOG -> { logView.text = ""; true }
-        else -> super.onOptionsItemSelected(item)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -303,6 +263,13 @@ class MainActivity : Activity() {
         val deviceName: String = runCatching { client.getValue("DeviceName") as String }.getOrDefault("iPod")
         val productVersion: String? = runCatching { client.getValue("ProductVersion") as String }.getOrNull()
 
+        init {
+            val label = deviceName + (productVersion?.let { " · iOS $it" } ?: "")
+            ui.device = label
+            ui.connected = true
+            prefs.edit().putString("last_device", label).apply()
+        }
+
         fun startService(name: String): LockdownClient.ServiceInfo {
             if (!stream.isClosed) {
                 try {
@@ -329,6 +296,7 @@ class MainActivity : Activity() {
     private fun runOnDevice(device: UsbDevice, after: () -> Unit = {}, job: (UsbMux, DeviceSession) -> Unit) {
         if (busy) { log("Busy, please wait for the current operation to finish."); return }
         busy = true
+        ui.task = lastHeadline
         Thread {
             try {
                 AppleUsbTransport.open(usbManager, device, ::log).use { usb ->
@@ -347,6 +315,8 @@ class MainActivity : Activity() {
                 log("ERROR: ${e.javaClass.simpleName}: ${e.message}")
             } finally {
                 busy = false
+                ui.connected = false
+                ui.task = null
                 keepScreenOn(false)
                 after()
             }
@@ -462,11 +432,11 @@ class MainActivity : Activity() {
         val labels = apps.mapIndexed { i, a -> (if (isSaved[i]) "✓ " else "") + "${a.name} ${a.version}${sizeLabel(a.sizeBytes)}" }
 
         val pad = (16 * resources.displayMetrics.density).toInt()
-        val skipBox = CheckBox(this).apply {
+        val skipBox = MaterialCheckBox(this).apply {
             text = "Skip apps already saved (✓ ${isSaved.count { it }} of ${apps.size})"
             isChecked = prefs.getBoolean("skip_saved", true)
         }
-        val dataBox = CheckBox(this).apply {
+        val dataBox = MaterialCheckBox(this).apply {
             text = "Also back up app data (saves, settings) as a separate .zip"
             isChecked = prefs.getBoolean("include_data", false)
         }
@@ -494,7 +464,7 @@ class MainActivity : Activity() {
             isFastScrollAlwaysVisible = apps.size > 20
         }
         var pickerDialog: AlertDialog? = null
-        val iconBox = CheckBox(this).apply {
+        val iconBox = MaterialCheckBox(this).apply {
             text = "Show app icons"
             isChecked = showIcons
             setOnCheckedChangeListener { _, checked ->
@@ -524,7 +494,7 @@ class MainActivity : Activity() {
             backup(device, chosen, skipBox.isChecked, dataBox.isChecked, saved)
         }
 
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Back up which apps?")
             .setView(view)
             .setPositiveButton("Back up selected") { _, _ ->
@@ -551,7 +521,7 @@ class MainActivity : Activity() {
         val toArchive = apps.filter { !(skipSaved && IpaSaver.ipaName(it.name, it.version, it.bundleId) in saved) }
         val alreadySaved = apps.size - toArchive.size
         if (toArchive.isEmpty() && !includeData) {
-            AlertDialog.Builder(this)
+            MaterialAlertDialogBuilder(this)
                 .setMessage("All ${apps.size} apps are already saved. Uncheck \"Skip apps already saved\" to back them up again.")
                 .setPositiveButton("OK") { _, _ -> showPicker(device, apps) }
                 .setOnCancelListener { showPicker(device, apps) }
@@ -585,7 +555,7 @@ class MainActivity : Activity() {
             append("\nKeep both devices connected. You can stop at any time.")
         }
         var handled = false
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Back up all apps?")
             .setMessage(msg)
             .setPositiveButton("Back up") { _, _ ->
@@ -756,25 +726,25 @@ class MainActivity : Activity() {
     }
 
     private fun setStopButtonVisible(visible: Boolean) = runOnUiThread {
-        stopButton.visibility = if (visible) View.VISIBLE else View.GONE
-        stopButton.isEnabled = true
-        stopButton.text = "Stop…"
+        ui.stopVisible = visible
+        ui.stopEnabled = true
+        ui.stopLabel = "Stop"
     }
 
     private fun confirmStop() {
         if (stopMode == StopMode.NOW) return
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Stop?")
             .setMessage("Anything already saved is kept either way.")
             .setPositiveButton("Stop now") { _, _ ->
                 stopMode = StopMode.NOW
-                stopButton.isEnabled = false
-                stopButton.text = "Stopping…"
+                ui.stopEnabled = false
+                ui.stopLabel = "Stopping…"
                 log("\nStopping now…")
             }
             .setNeutralButton("After this item") { _, _ ->
                 stopMode = StopMode.AFTER_CURRENT
-                stopButton.text = "Stopping after this item… (tap to stop now)"
+                ui.stopLabel = "Stopping after this item (tap to stop now)"
                 log("\nWill stop after the current item finishes.")
             }
             .setNegativeButton("Keep going", null)
@@ -968,7 +938,7 @@ class MainActivity : Activity() {
 
     private fun confirmSave(msg: String, cmd: BrowserCmd.Prepare, cmds: LinkedBlockingQueue<BrowserCmd>) {
         var handled = false
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setMessage(msg)
             .setPositiveButton("Save") { _, _ -> handled = true; cmds.offer(BrowserCmd.Download(cmd.items, cmd.returnTo)) }
             .setNegativeButton("Back") { _, _ -> handled = true; cmds.offer(BrowserCmd.Open(cmd.returnTo)) }
@@ -980,7 +950,7 @@ class MainActivity : Activity() {
         val pad = (20 * resources.displayMetrics.density).toInt()
         val tv = TextView(this).apply { text = "Counting files…"; setPadding(pad, pad / 2, pad, 0) }
         measureText = tv
-        measureDialog = AlertDialog.Builder(this)
+        measureDialog = MaterialAlertDialogBuilder(this)
             .setTitle("Measuring folder")
             .setView(tv)
             .setNegativeButton("Cancel") { _, _ -> measureCancelled = true }
@@ -1065,7 +1035,7 @@ class MainActivity : Activity() {
             addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.55).toInt()))
         }
 
-        val dialog = AlertDialog.Builder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(label)
             .setView(container)
             .setPositiveButton("Save", null)
@@ -1081,8 +1051,8 @@ class MainActivity : Activity() {
 
         fun refresh() {
             adapter.notifyDataSetChanged()
-            val pos = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-            val neu = dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
+            val pos = dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
+            val neu = dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)
             if (selecting) {
                 hintView.text = "${selected.size} selected · tap to check or uncheck"
                 pos.visibility = View.VISIBLE
@@ -1134,17 +1104,17 @@ class MainActivity : Activity() {
         }
 
         dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
                 val items = selected.sorted().mapNotNull { i ->
                     val (name, e) = entries[i]
                     e?.let { BrowserItem(join(path, name), it.isDir, it.size) }
                 }
                 if (items.isNotEmpty()) go(BrowserCmd.Prepare(items, path))
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL).setOnClickListener {
                 if (selecting) clearSelection() else go(BrowserCmd.Prepare(listOf(BrowserItem(path, true, 0)), path))
             }
-            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener { go(BrowserCmd.Close) }
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).setOnClickListener { go(BrowserCmd.Close) }
             refresh()
         }
         dialog.setOnKeyListener { _, keyCode, event ->
@@ -1364,7 +1334,7 @@ class MainActivity : Activity() {
             addView(hintView)
             addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.55).toInt()))
         }
-        val dialog = AlertDialog.Builder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(if (musicOther) "Podcasts, Audiobooks, Video & Ringtones (${tracks.size})" else "Music (${tracks.size} songs)")
             .setView(container)
             .setPositiveButton("Copy", null)
@@ -1383,11 +1353,11 @@ class MainActivity : Activity() {
             adapter.notifyDataSetChanged()
             val selectedTracks = tracks.filter { it.pid in musicSelected }
             hintView.text = "${visible.size} shown · ${selectedTracks.size} selected (${humanSize(selectedTracks.sumOf { it.size })})"
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)?.apply {
                 isEnabled = selectedTracks.isNotEmpty()
                 text = if (selectedTracks.isEmpty()) "Copy" else "Copy ${selectedTracks.size}"
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.text =
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)?.text =
                 if (visible.isNotEmpty() && visible.all { it.pid in musicSelected }) "Select none" else "Select all"
         }
 
@@ -1405,7 +1375,7 @@ class MainActivity : Activity() {
             refresh()
         }
         dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
                 val chosen = tracks.filter { it.pid in musicSelected }
                 if (chosen.isNotEmpty()) {
                     handled = true
@@ -1413,12 +1383,12 @@ class MainActivity : Activity() {
                     confirmCopySongs(chosen, cmds)
                 }
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL).setOnClickListener {
                 if (visible.isNotEmpty() && visible.all { it.pid in musicSelected }) visible.forEach { musicSelected.remove(it.pid) }
                 else visible.forEach { musicSelected.add(it.pid) }
                 refresh()
             }
-            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener { go(MusicCmd.Close) }
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).setOnClickListener { go(MusicCmd.Close) }
             refresh()
         }
         dialog.setOnCancelListener { if (!handled) { handled = true; cmds.offer(MusicCmd.Close) } }
@@ -1449,7 +1419,7 @@ class MainActivity : Activity() {
             }
         }
         val pad = (20 * resources.displayMetrics.density).toInt()
-        val tagBox = CheckBox(this).apply {
+        val tagBox = MaterialCheckBox(this).apply {
             text = "Write song info (title, artist, album, track…) into the files"
             isChecked = prefs.getBoolean("write_tags", true)
         }
@@ -1460,7 +1430,7 @@ class MainActivity : Activity() {
             addView(tagBox)
         }
         var handled = false
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setView(body)
             .setPositiveButton("Copy") { _, _ ->
                 handled = true
@@ -1778,7 +1748,7 @@ class MainActivity : Activity() {
             addView(header)
             addView(grid, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.62).toInt()))
         }
-        val dialog = AlertDialog.Builder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle("Camera roll")
             .setView(container)
             .setPositiveButton("Save", null)
@@ -1797,12 +1767,12 @@ class MainActivity : Activity() {
             val chosen = media.filter { it.path in photoSelected }
             header.text = "$photoCount photos · ${media.size - photoCount} videos" +
                 if (selecting) " · ${chosen.size} selected (${humanSize(chosen.sumOf { it.size })})" else " · tap to view, hold to select"
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)?.apply {
                 visibility = if (selecting) View.VISIBLE else View.GONE
                 isEnabled = chosen.isNotEmpty()
                 text = "Save ${chosen.size}"
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.text = when {
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)?.text = when {
                 selecting && chosen.size == media.size -> "Select none"
                 else -> "Select all"
             }
@@ -1823,7 +1793,7 @@ class MainActivity : Activity() {
             true
         }
         dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
                 val chosen = media.filter { it.path in photoSelected }
                 if (chosen.isNotEmpty()) {
                     handled = true
@@ -1831,7 +1801,7 @@ class MainActivity : Activity() {
                     confirmSaveMedia(chosen, cmds)
                 }
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL).setOnClickListener {
                 if (selecting && photoSelected.size == media.size) {
                     photoSelected.clear()
                     selecting = false
@@ -1841,7 +1811,7 @@ class MainActivity : Activity() {
                 }
                 refresh()
             }
-            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener { go(PhotoCmd.Close) }
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).setOnClickListener { go(PhotoCmd.Close) }
             refresh()
             grid.setSelection(photoFirstVisible.coerceIn(0, maxOf(0, media.size - 1)))
         }
@@ -1912,7 +1882,7 @@ class MainActivity : Activity() {
         val date = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
             .format(java.util.Date(m.mtimeMs))
         var handled = false
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle(m.name)
             .setMessage("$date · ${humanSize(m.size)}")
             .setView(frame)
@@ -1960,7 +1930,7 @@ class MainActivity : Activity() {
             }
         }
         var handled = false
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setMessage(msg)
             .setPositiveButton("Save") { _, _ -> handled = true; cmds.offer(PhotoCmd.Save(chosen)) }
             .setNegativeButton("Back") { _, _ -> handled = true; cmds.offer(PhotoCmd.Show) }
@@ -2030,7 +2000,7 @@ class MainActivity : Activity() {
         val pad = (20 * resources.displayMetrics.density).toInt()
         val tv = TextView(this).apply { text = "Starting…"; setPadding(pad, pad / 2, pad, 0) }
         progressText = tv
-        progressDialog = AlertDialog.Builder(this)
+        progressDialog = MaterialAlertDialogBuilder(this)
             .setTitle(title)
             .setView(tv)
             .setNegativeButton("Cancel") { _, _ -> onCancel() }
@@ -2141,7 +2111,7 @@ class MainActivity : Activity() {
             addView(hint)
             addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.55).toInt()))
         }
-        val dialog = AlertDialog.Builder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle(title)
             .setView(container)
             .setPositiveButton("Save", null)
@@ -2153,11 +2123,11 @@ class MainActivity : Activity() {
             adapter.notifyDataSetChanged()
             val chosen = picks.filter { it.key in selected }
             hint.text = "${picks.size} items · ${chosen.size} selected (${humanSize(chosen.sumOf { it.size })}) · tap to select"
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)?.apply {
                 isEnabled = chosen.isNotEmpty()
                 text = if (chosen.isEmpty()) "Save" else "Save ${chosen.size}"
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.text = if (chosen.size == picks.size) "Select none" else "Select all"
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)?.text = if (chosen.size == picks.size) "Select none" else "Select all"
         }
         list.setOnItemClickListener { _, _, position, _ ->
             val k = picks[position].key
@@ -2165,15 +2135,15 @@ class MainActivity : Activity() {
             refresh()
         }
         dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
                 val chosen = picks.filter { it.key in selected }
                 if (chosen.isNotEmpty()) { handled = true; dialog.dismiss(); onSave(chosen) }
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL).setOnClickListener {
                 if (selected.size == picks.size) selected.clear() else picks.forEach { selected += it.key }
                 refresh()
             }
-            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).setOnClickListener {
                 if (!handled) { handled = true; cmds.offer(PickCmd.Close) }
                 dialog.dismiss()
             }
@@ -2198,7 +2168,7 @@ class MainActivity : Activity() {
             }
         }
         var handled = false
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setMessage(msg)
             .setPositiveButton("Save") { _, _ -> handled = true; cmds.offer(PickCmd.Save(chosen.map { it.key })) }
             .setNegativeButton("Back") { _, _ -> handled = true; cmds.offer(PickCmd.Show) }
@@ -2405,7 +2375,7 @@ class MainActivity : Activity() {
 
     private fun exportPersonalData(device: UsbDevice) {
         val pad = (20 * resources.displayMetrics.density).toInt()
-        fun box(label: String, key: String) = CheckBox(this).apply { text = label; isChecked = prefs.getBoolean(key, true) }
+        fun box(label: String, key: String) = MaterialCheckBox(this).apply { text = label; isChecked = prefs.getBoolean(key, true) }
         val contacts = box("Contacts → .vcf (imports into Google Contacts)", "export_contacts")
         val notes = box("Notes → .html, plus a .zip of text files", "export_notes")
         val bookmarks = box("Safari bookmarks & Reading List → .html (imports into any browser)", "export_bookmarks")
@@ -2423,7 +2393,7 @@ class MainActivity : Activity() {
             addView(bookmarks)
             addView(calendars)
         }
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Contacts, Notes, Bookmarks & Calendars")
             .setView(body)
             .setPositiveButton("Export") { _, _ ->
@@ -2530,7 +2500,7 @@ class MainActivity : Activity() {
 
     private fun exportMessages(device: UsbDevice) {
         val pad = (20 * resources.displayMetrics.density).toInt()
-        val attach = CheckBox(this).apply {
+        val attach = MaterialCheckBox(this).apply {
             text = "Include photos & attachments (adds a .zip with one page per conversation)"
             isChecked = prefs.getBoolean("msg_attachments", true)
         }
@@ -2546,7 +2516,7 @@ class MainActivity : Activity() {
             })
             addView(attach)
         }
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Messages")
             .setView(body)
             .setPositiveButton("Export") { _, _ ->
@@ -2679,8 +2649,12 @@ class MainActivity : Activity() {
     /** An .ipa to install: one this app saved, or one picked with the system file picker. */
     private class RestoreItem(val name: String, val uri: android.net.Uri, val size: Long)
 
-    /** Waiting for the system file picker; resumed in onActivityResult. */
+    /** Waiting for the system file picker; resumed in [handlePickedIpas]. */
     private var pendingRestoreDevice: UsbDevice? = null
+
+    private val pickIpas = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        handlePickedIpas(uris)
+    }
 
     private fun bundleIdFromName(name: String) = Regex("\\(([^()]+)\\)(?: data\\.zip|\\.ipa)$").find(name)?.groupValues?.get(1)
 
@@ -2705,12 +2679,12 @@ class MainActivity : Activity() {
 
         var dataOnly = prefs.getBoolean("restore_data_only", false)
         val modes = android.widget.RadioGroup(this).apply { orientation = android.widget.RadioGroup.VERTICAL }
-        val installMode = android.widget.RadioButton(this).apply { text = "Install apps (.ipa)"; id = View.generateViewId() }
-        val dataMode = android.widget.RadioButton(this).apply { text = "Restore app data only (apps already on the device)"; id = View.generateViewId() }
+        val installMode = com.google.android.material.radiobutton.MaterialRadioButton(this).apply { text = "Install apps (.ipa)"; id = View.generateViewId() }
+        val dataMode = com.google.android.material.radiobutton.MaterialRadioButton(this).apply { text = "Restore app data only (apps already on the device)"; id = View.generateViewId() }
         modes.addView(installMode)
         modes.addView(dataMode)
         val hint = TextView(this).apply { textSize = 13f; alpha = 0.8f; setPadding(0, pad / 3, 0, pad / 3) }
-        val dataBox = CheckBox(this).apply {
+        val dataBox = MaterialCheckBox(this).apply {
             text = "Also restore app data (saves, settings) from a matching data .zip backup. " +
                 "This replaces the saves currently on the device."
             isChecked = prefs.getBoolean("restore_data", false)
@@ -2727,7 +2701,7 @@ class MainActivity : Activity() {
             addView(dataBox)
             addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.42).toInt()))
         }
-        val dialog = AlertDialog.Builder(this)
+        val dialog = MaterialAlertDialogBuilder(this)
             .setTitle("Restore to the device")
             .setView(view)
             .setPositiveButton("Restore selected", null)
@@ -2747,7 +2721,7 @@ class MainActivity : Activity() {
                 ipas.isEmpty() -> "No .ipa backups in Download/${IpaSaver.FOLDER}/ yet. Use \"Choose file…\" to pick one."
                 else -> "Apps backed up to Download/${IpaSaver.FOLDER}/:"
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.visibility = if (dataOnly) View.GONE else View.VISIBLE
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)?.visibility = if (dataOnly) View.GONE else View.VISIBLE
         }
         modes.check(if (dataOnly) dataMode.id else installMode.id)
         modes.setOnCheckedChangeListener { _, checkedId ->
@@ -2758,7 +2732,7 @@ class MainActivity : Activity() {
 
         dialog.setOnShowListener {
             applyMode()
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
                 remember()
                 val checked = list.checkedItemPositions
                 if (dataOnly) {
@@ -2773,23 +2747,18 @@ class MainActivity : Activity() {
                     confirmRestore(device, chosen, dataBox.isChecked)
                 }
             }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL).setOnClickListener {
                 remember()
                 dialog.dismiss()
                 pendingRestoreDevice = device
-                @Suppress("DEPRECATION")
-                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-                }, REQ_PICK_IPA)
+                pickIpas.launch(arrayOf("*/*"))
             }
         }
         dialog.show()
     }
 
     private fun confirmRestoreDataOnly(device: UsbDevice, zips: List<IpaSaver.Saved>) {
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Restore app data?")
             .setMessage("Write ${zips.size} data backup${if (zips.size == 1) "" else "s"} into the installed apps?\n\n" +
                 "Saved files replace the matching files on the device; anything the backup doesn't have is left alone. " +
@@ -2857,18 +2826,10 @@ class MainActivity : Activity() {
         }
     }
 
-    @Deprecated("Activity result API isn't available on the plain framework Activity")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        @Suppress("DEPRECATION")
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_PICK_IPA) return
+    private fun handlePickedIpas(uris: List<android.net.Uri>) {
         val device = pendingRestoreDevice ?: return
         pendingRestoreDevice = null
-        if (resultCode != RESULT_OK || data == null) return
-        val uris = buildList {
-            data.clipData?.let { clip -> for (i in 0 until clip.itemCount) add(clip.getItemAt(i).uri) }
-            data.data?.let { if (it !in this) add(it) }
-        }
+        if (uris.isEmpty()) return
         val items = uris.map { uri ->
             var name = uri.lastPathSegment?.substringAfterLast('/') ?: "app.ipa"
             var size = -1L
@@ -2895,7 +2856,7 @@ class MainActivity : Activity() {
             append("\n\nApp Store apps only install on a device signed into the Apple ID that bought them, ")
             append("or on a jailbroken device with AppSync.")
         }
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Install apps?")
             .setMessage(msg)
             .setPositiveButton("Install") { _, _ -> runRestore(device, items, restoreData) }
@@ -3019,7 +2980,7 @@ class MainActivity : Activity() {
 
     private fun copyLog() {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("IPA Backup log", logView.text))
+        cm.setPrimaryClip(ClipData.newPlainText("IPA Backup log", ui.log.joinToString("\n")))
         Toast.makeText(this, "Log copied", Toast.LENGTH_SHORT).show()
     }
 
@@ -3028,9 +2989,12 @@ class MainActivity : Activity() {
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
-    private fun log(msg: String) = runOnUiThread {
-        logView.append(msg + "\n")
-        scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+    private fun log(msg: String) {
+        if (msg.startsWith("\n")) lastHeadline = msg.trim().lineSequence().firstOrNull()
+        runOnUiThread {
+            msg.split('\n').forEach { ui.log.add(it) }
+            if (ui.log.size > 5000) ui.log.removeRange(0, ui.log.size - 5000)
+        }
     }
 
     @Suppress("DEPRECATION")
