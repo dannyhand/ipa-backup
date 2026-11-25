@@ -1,9 +1,10 @@
 # IPA Backup
 
-Back up the apps on an old iPod touch, iPhone or iPad to your Android phone over a USB cable,
-with no computer, no root on the phone, and no jailbreak needed on the iOS device.
+Back up the apps on an old iPod Touch, iPhone or iPad to your Android phone over a USB cable,
+with no computer, no root on the phone, and no jailbreak needed on the iOS device. See Device support 
+section below for which iOS versions are supported.
 
-Built to rescue App Store games that are long gone from the store, from an iPod touch 4th gen on iOS 6.1.6.
+Built to rescue App Store games that are long gone from the store, from an iPod Touch 4th gen on iOS 6.1.6.
 
 ## Features
 
@@ -27,11 +28,6 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
   `.ics` per calendar
 - **Messages** (AFC2): iMessage/SMS conversations as a readable chat-bubble web page with names from your
   contacts, plus an optional zip with a page per conversation and the photos/attachments
-- **Optional app icons** in the app list (off by default; fetched once and cached)
-- **Back up all** first shows the estimated total size and checks your phone's free space
-- **Browse files:** hold to select several files or folders and save them at once. Folder zips show an
-  estimated size before saving, and the current path can be selected and copied.
-- **Stop anytime:** stop right away (the partial file is discarded) or after the current app finishes
 - Your apps stay installed on the device. The archive is made with `SkipUninstall`.
 
 ## Requirements
@@ -89,7 +85,7 @@ documentation and source. No code was copied.
 | Contacts, Notes, Bookmarks, Calendars, Messages | Jailbreak with AFC2 ("Apple File Conduit 2" from Cydia) |
 | Files | Media folder without a jailbreak; whole filesystem with AFC2 |
 
-Tested on an iPod touch 4th gen, iOS 6.1.6. The source has notes at each layer on what was learned along the way.
+Tested on an iPod Touch 4th gen, iOS 6.1.6. The source has notes at each layer on what was learned along the way.
 
 ## Building
 
