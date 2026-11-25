@@ -44,6 +44,7 @@ import us.dannyhand.ipabackup.pairing.PairRecord
 import us.dannyhand.ipabackup.pairing.PairRecordStore
 import us.dannyhand.ipabackup.springboard.SpringBoardServices
 import us.dannyhand.ipabackup.music.AndroidSqlDb
+import us.dannyhand.ipabackup.music.ItlpLibrary
 import us.dannyhand.ipabackup.music.MusicLibrary
 import us.dannyhand.ipabackup.util.AudioTagger
 import us.dannyhand.ipabackup.util.ExifThumb
@@ -1206,33 +1207,40 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Copies MediaLibrary.sqlitedb (plus its WAL files, if any) from the iPod and reads it. */
+    /**
+     * Reads the iPod's music library: MediaLibrary.sqlitedb (iOS 5+), or the iTunes Library.itlp
+     * folder (iPhone OS 3 / iOS 4). Returns null (after logging why) if neither can be read.
+     */
     private fun loadMusicLibrary(afc: AfcClient): List<MusicLibrary.Track>? {
-        val dir = java.io.File(cacheDir, "medialib").apply { deleteRecursively(); mkdirs() }
-        for (suffix in listOf("", "-wal", "-shm")) {
-            val devicePath = MusicLibrary.DB_PATH + suffix
-            if (suffix.isNotEmpty() && runCatching { afc.stat(devicePath) }.isFailure) continue
-            try {
-                java.io.FileOutputStream(java.io.File(dir, "MediaLibrary.sqlitedb$suffix")).use { afc.copyFile(devicePath, it) }
-            } catch (e: Exception) {
-                if (suffix.isEmpty()) {
-                    log("No music library found on the iPod (${e.message}). iOS 5 or newer is needed.")
-                    return null
+        copySqlite(afc, MusicLibrary.DB_PATH, "medialib")?.let { file ->
+            return try {
+                withSqlite(file) { db ->
+                    val lib = MusicLibrary(db)
+                    lib.load().also { log("(library: ${lib.diagnostics})") }
                 }
+            } catch (e: Exception) {
+                log("Couldn't read the music library: ${e.message}")
+                null
             }
         }
-        return try {
-            android.database.sqlite.SQLiteDatabase.openDatabase(
-                java.io.File(dir, "MediaLibrary.sqlitedb").path, null,
-                android.database.sqlite.SQLiteDatabase.OPEN_READWRITE, // it's our private copy
-            ).use { db ->
-                val lib = MusicLibrary(AndroidSqlDb(db))
-                lib.load().also { log("(library: ${lib.diagnostics})") }
+        // iPhone OS 3 / iOS 4: two SQLite files that belong together.
+        val library = copySqlite(afc, ItlpLibrary.LIBRARY, "itlp-library")
+        val locations = copySqlite(afc, ItlpLibrary.LOCATIONS, "itlp-locations")
+        if (library != null && locations != null) {
+            return try {
+                withSqlite(library) { db ->
+                    db.exec("ATTACH DATABASE '${locations.path.replace("'", "''")}' AS loc")
+                    ItlpLibrary(db).load().also { log("(library: iOS 3/4 iTunes Library.itlp, ${it.size} items)") }
+                }
+            } catch (e: Exception) {
+                log("Couldn't read the iOS 3/4 music library: ${e.message}")
+                null
             }
-        } catch (e: Exception) {
-            log("Couldn't read the music library: ${e.message}")
-            null
         }
+        val oldDb = listOf("/iTunes_Control/iTunes/iTunesCDB", "/iTunes_Control/iTunes/iTunesDB").any { runCatching { afc.stat(it) }.isSuccess }
+        log(if (oldDb) "This device uses the iPhone OS 1–2 iTunesDB music format, which isn't supported yet."
+            else "No music library found on the device.")
+        return null
     }
 
     /** Searchable song list: tap to check/uncheck, Select all/none applies to what the search shows. */

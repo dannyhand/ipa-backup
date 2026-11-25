@@ -10,9 +10,11 @@ class AndroidSqlDb(private val db: SQLiteDatabase) : SqlDb {
         }
 
     override fun columns(table: String): Set<String> =
-        db.rawQuery("PRAGMA table_info(\"${table.replace("\"", "")}\")", null).use { c ->
+        db.rawQuery(tableInfoSql(table), null).use { c ->
             buildSet { while (c.moveToNext()) add(c.getString(1)) }
         }
+
+    override fun exec(sql: String) = db.execSQL(sql)
 
     override fun query(sql: String): List<List<Any?>> = db.rawQuery(sql, null).use { c ->
         val rows = ArrayList<List<Any?>>()

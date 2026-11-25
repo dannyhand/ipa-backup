@@ -13,9 +13,10 @@ class JdbcSqlDb(private val c: Connection) : SqlDb {
         "SELECT name FROM sqlite_master WHERE type IN ('table','view')").use { rs ->
         buildSet { while (rs.next()) add(rs.getString(1)) }
     }
-    override fun columns(table: String) = c.createStatement().executeQuery("PRAGMA table_info(\"$table\")").use { rs ->
+    override fun columns(table: String) = c.createStatement().executeQuery(us.dannyhand.ipabackup.music.tableInfoSql(table)).use { rs ->
         buildSet { while (rs.next()) add(rs.getString(2)) }
     }
+    override fun exec(sql: String) { c.createStatement().execute(sql) }
     override fun query(sql: String) = c.createStatement().executeQuery(sql).use { rs ->
         val n = rs.metaData.columnCount
         buildList { while (rs.next()) add(List(n) { i -> rs.getObject(i + 1) }) }

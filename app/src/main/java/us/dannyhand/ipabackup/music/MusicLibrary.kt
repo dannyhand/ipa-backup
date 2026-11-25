@@ -5,8 +5,18 @@ import java.io.IOException
 /** Minimal SQL access so the library reader runs on Android (SQLiteDatabase) and in JVM tests (JDBC). */
 interface SqlDb {
     fun tables(): Set<String>
+    /** [table] may be schema-qualified, e.g. "loc.location" for an ATTACHed database. */
     fun columns(table: String): Set<String>
     fun query(sql: String): List<List<Any?>>
+    /** Runs a statement that returns no rows (e.g. ATTACH DATABASE). */
+    fun exec(sql: String)
+}
+
+/** PRAGMA for a possibly schema-qualified table name. */
+fun tableInfoSql(table: String): String {
+    val schema = table.substringBefore('.', "")
+    val name = table.substringAfter('.').replace("\"", "")
+    return if (schema.isEmpty()) "PRAGMA table_info(\"$name\")" else "PRAGMA ${schema.filter { it.isLetterOrDigit() || it == '_' }}.table_info(\"$name\")"
 }
 
 /**

@@ -70,7 +70,7 @@ Android's USB Host API:
 | `housearrest/` | house_arrest: access an app's sandbox for data backups |
 | `plist/` | XML and binary property lists |
 | `springboard/` | springboardservices: app icons |
-| `music/` | Reads `iTunes_Control/iTunes/MediaLibrary.sqlitedb` (iOS 5+) |
+| `music/` | Reads `MediaLibrary.sqlitedb` (iOS 5+) or `iTunes Library.itlp` (iPhone OS 3 / iOS 4) |
 | `util/AudioTagger` | Writes MP4 (ilst) and ID3v2.3 tags; keeps audio data byte-identical |
 | `photos/`, `util/ExifThumb` | Camera roll listing; thumbnails from the EXIF preview in each photo's first few KB |
 | `media/` | Voice Memos (`Recordings.db`) and iBooks (`Books.plist`) readers |
