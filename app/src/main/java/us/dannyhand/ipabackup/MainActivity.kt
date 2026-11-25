@@ -2687,46 +2687,95 @@ class MainActivity : Activity() {
     private fun showRestorePicker(device: UsbDevice) {
         val saver = IpaSaver(this)
         val ipas = saver.listSaved(".ipa").sortedBy { it.name.lowercase() }
-        val dataIds = saver.listSaved(" data.zip").mapNotNull { bundleIdFromName(it.name) }.toSet()
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        // Newest data backup per app.
+        val dataZips = saver.listSaved(" data.zip").filter { bundleIdFromName(it.name) != null }
+            .groupBy { bundleIdFromName(it.name)!! }.values.map { g -> g.maxByOrNull { it.modifiedMs }!! }
+            .sortedBy { it.name.lowercase() }
+        val dataIds = dataZips.mapNotNull { bundleIdFromName(it.name) }.toSet()
+        val density = resources.displayMetrics.density
+        val pad = (16 * density).toInt()
+        val shortDay = java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM)
 
+        val ipaLabels = ipas.map { s ->
+            s.name.removeSuffix(".ipa") + "  (${humanSize(s.size)})" + if (bundleIdFromName(s.name) in dataIds) "  + data" else ""
+        }
+        val dataLabels = dataZips.map { s ->
+            s.name.removeSuffix(" data.zip") + "  (${humanSize(s.size)}, ${shortDay.format(java.util.Date(s.modifiedMs))})"
+        }
+
+        var dataOnly = prefs.getBoolean("restore_data_only", false)
+        val modes = android.widget.RadioGroup(this).apply { orientation = android.widget.RadioGroup.VERTICAL }
+        val installMode = android.widget.RadioButton(this).apply { text = "Install apps (.ipa)"; id = View.generateViewId() }
+        val dataMode = android.widget.RadioButton(this).apply { text = "Restore app data only (apps already on the device)"; id = View.generateViewId() }
+        modes.addView(installMode)
+        modes.addView(dataMode)
+        val hint = TextView(this).apply { textSize = 13f; alpha = 0.8f; setPadding(0, pad / 3, 0, pad / 3) }
         val dataBox = CheckBox(this).apply {
             text = "Also restore app data (saves, settings) from a matching data .zip backup. " +
                 "This replaces the saves currently on the device."
             isChecked = prefs.getBoolean("restore_data", false)
         }
-        val labels = ipas.map { s ->
-            s.name.removeSuffix(".ipa") + "  (${humanSize(s.size)})" + if (bundleIdFromName(s.name) in dataIds) "  + data" else ""
-        }
         val list = ListView(this).apply {
             choiceMode = ListView.CHOICE_MODE_MULTIPLE
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_multiple_choice, labels)
             isFastScrollEnabled = true
         }
         val view = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad / 2, pad, 0)
-            addView(TextView(this@MainActivity).apply {
-                text = if (ipas.isEmpty()) "No .ipa backups in Download/${IpaSaver.FOLDER}/ yet. Use \"Choose file…\" to pick one."
-                    else "Apps backed up to Download/${IpaSaver.FOLDER}/:"
-                textSize = 13f
-                alpha = 0.8f
-            })
+            addView(modes)
+            addView(hint)
             addView(dataBox)
-            if (ipas.isNotEmpty()) addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.45).toInt()))
+            addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.42).toInt()))
         }
-        fun remember() = prefs.edit().putBoolean("restore_data", dataBox.isChecked).apply()
-        AlertDialog.Builder(this)
-            .setTitle("Install apps onto the device")
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Restore to the device")
             .setView(view)
-            .setPositiveButton("Install selected") { _, _ ->
+            .setPositiveButton("Restore selected", null)
+            .setNeutralButton("Choose file…", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        fun applyMode() {
+            list.clearChoices()
+            list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_multiple_choice, if (dataOnly) dataLabels else ipaLabels)
+            dataBox.visibility = if (dataOnly) View.GONE else View.VISIBLE
+            hint.text = when {
+                dataOnly && dataZips.isEmpty() -> "No app data backups yet. Back up apps with \"Also back up app data\" checked first."
+                dataOnly -> "Writes the saved Documents/ and Library/ back into apps that are already installed, without " +
+                    "reinstalling them. Close the app on the device first (double-press Home and remove it), or it may " +
+                    "overwrite the restored saves when it quits."
+                ipas.isEmpty() -> "No .ipa backups in Download/${IpaSaver.FOLDER}/ yet. Use \"Choose file…\" to pick one."
+                else -> "Apps backed up to Download/${IpaSaver.FOLDER}/:"
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.visibility = if (dataOnly) View.GONE else View.VISIBLE
+        }
+        modes.check(if (dataOnly) dataMode.id else installMode.id)
+        modes.setOnCheckedChangeListener { _, checkedId ->
+            dataOnly = checkedId == dataMode.id
+            applyMode()
+        }
+        fun remember() = prefs.edit().putBoolean("restore_data", dataBox.isChecked).putBoolean("restore_data_only", dataOnly).apply()
+
+        dialog.setOnShowListener {
+            applyMode()
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 remember()
                 val checked = list.checkedItemPositions
-                val chosen = ipas.filterIndexed { i, _ -> checked.get(i) }.map { RestoreItem(it.name, it.uri, it.size) }
-                if (chosen.isEmpty()) log("Nothing selected.") else confirmRestore(device, chosen, dataBox.isChecked)
+                if (dataOnly) {
+                    val chosen = dataZips.filterIndexed { i, _ -> checked.get(i) }
+                    if (chosen.isEmpty()) { Toast.makeText(this, "Nothing selected", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
+                    dialog.dismiss()
+                    confirmRestoreDataOnly(device, chosen)
+                } else {
+                    val chosen = ipas.filterIndexed { i, _ -> checked.get(i) }.map { RestoreItem(it.name, it.uri, it.size) }
+                    if (chosen.isEmpty()) { Toast.makeText(this, "Nothing selected", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
+                    dialog.dismiss()
+                    confirmRestore(device, chosen, dataBox.isChecked)
+                }
             }
-            .setNeutralButton("Choose file…") { _, _ ->
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
                 remember()
+                dialog.dismiss()
                 pendingRestoreDevice = device
                 @Suppress("DEPRECATION")
                 startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -2735,8 +2784,77 @@ class MainActivity : Activity() {
                     putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
                 }, REQ_PICK_IPA)
             }
+        }
+        dialog.show()
+    }
+
+    private fun confirmRestoreDataOnly(device: UsbDevice, zips: List<IpaSaver.Saved>) {
+        AlertDialog.Builder(this)
+            .setTitle("Restore app data?")
+            .setMessage("Write ${zips.size} data backup${if (zips.size == 1) "" else "s"} into the installed apps?\n\n" +
+                "Saved files replace the matching files on the device; anything the backup doesn't have is left alone. " +
+                "Apps that aren't installed are skipped.\n\nClose these apps on the device first.")
+            .setPositiveButton("Restore") { _, _ -> runRestoreDataOnly(device, zips) }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    /** Writes a data backup into an installed app's sandbox (house_arrest). Returns files written. */
+    private fun restoreDataZip(mux: UsbMux, lockdown: DeviceSession, bundleId: String, zip: IpaSaver.Saved): Int =
+        withService(mux, lockdown, HouseArrest.SERVICE) { s ->
+            HouseArrest.vendContainer(s, bundleId)
+            val box = AfcClient(s).apply { cancelCheck = ::checkStopNow }
+            contentResolver.openInputStream(zip.uri)?.use { box.unzipInto(it, "/", setOf("Documents", "Library")) }
+                ?: throw IOException("Can't open ${zip.name}")
+        }
+
+    private fun runRestoreDataOnly(device: UsbDevice, zips: List<IpaSaver.Saved>) {
+        if (busy) { log("Busy, please wait for the current operation to finish."); return }
+        stopMode = StopMode.NONE
+        keepScreenOn(true)
+        setStopButtonVisible(true)
+        log("\nRestoring app data for ${zips.size} app(s)…")
+        runOnDevice(device, after = { setStopButtonVisible(false); stopMode = StopMode.NONE }) { mux, lockdown ->
+            val installed = withService(mux, lockdown, InstallationProxy.SERVICE) { InstallationProxy(it).browseUserApps() }
+                .associateBy { it.bundleId }
+            var ok = 0
+            var done = 0
+            val skipped = ArrayList<String>()
+            val failed = ArrayList<String>()
+            for ((i, zip) in zips.withIndex()) {
+                if (stopMode != StopMode.NONE) break
+                val id = bundleIdFromName(zip.name)!!
+                val label = zip.name.removeSuffix(" data.zip")
+                log("\n[${i + 1}/${zips.size}] $label")
+                val app = installed[id]
+                if (app == null) {
+                    log("  not installed on the device; use Install mode with \"Also restore app data\" instead")
+                    skipped += label
+                    done = i + 1
+                    continue
+                }
+                if (IpaSaver.dataName(app.name, app.version, app.bundleId) != zip.name) {
+                    log("  note: backup is from a different version than the installed ${app.version} (usually fine)")
+                }
+                try {
+                    val n = restoreDataZip(mux, lockdown, id, zip)
+                    log("  restored $n files ✓")
+                    ok++
+                } catch (e: StopNowException) {
+                    log("  stopped partway; some files were already written")
+                    break
+                } catch (e: Exception) {
+                    log("  FAILED: ${e.message}")
+                    failed += label
+                }
+                done = i + 1
+            }
+            val stopped = stopMode != StopMode.NONE
+            log((if (stopped) "\nStopped" else "\nDone") + ": $ok restored" +
+                (if (skipped.isNotEmpty()) ", ${skipped.size} not installed" else "") +
+                (if (stopped && done < zips.size) ", ${zips.size - done} not restored" else "") +
+                (if (failed.isEmpty()) "." else "\nFailed: ${failed.joinToString()}"))
+        }
     }
 
     @Deprecated("Activity result API isn't available on the plain framework Activity")
@@ -2857,11 +2975,7 @@ class MainActivity : Activity() {
                                 if (dz == null) {
                                     log("  no data backup for this app")
                                 } else {
-                                    val n = withService(mux, lockdown, HouseArrest.SERVICE) { s ->
-                                        HouseArrest.vendContainer(s, id!!)
-                                        val box = AfcClient(s).apply { cancelCheck = ::checkStopNow }
-                                        contentResolver.openInputStream(dz.uri)?.use { box.unzipInto(it, "/", setOf("Documents", "Library")) } ?: 0
-                                    }
+                                    val n = restoreDataZip(mux, lockdown, id!!, dz)
                                     log("  restored $n data files from ${dz.name}")
                                     datas++
                                 }
