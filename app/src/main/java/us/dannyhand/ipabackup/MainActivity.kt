@@ -45,6 +45,7 @@ import us.dannyhand.ipabackup.pairing.PairRecordStore
 import us.dannyhand.ipabackup.springboard.SpringBoardServices
 import us.dannyhand.ipabackup.music.AndroidSqlDb
 import us.dannyhand.ipabackup.music.MusicLibrary
+import us.dannyhand.ipabackup.util.AudioTagger
 import us.dannyhand.ipabackup.usb.AppleUsbTransport
 import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
@@ -58,6 +59,8 @@ class MainActivity : Activity() {
         const val AFC2_SERVICE = "com.apple.afc2"
         const val FILES_SUBFOLDER = "Files"
         const val MUSIC_SUBFOLDER = "Music"
+        /** Formats we can write song info into (DRM .m4p is left untouched). */
+        val TAGGABLE = setOf("m4a", "m4b", "aac", "mp3")
     }
 
     private lateinit var logView: TextView
@@ -377,6 +380,8 @@ class MainActivity : Activity() {
         val list = ListView(this).apply {
             choiceMode = ListView.CHOICE_MODE_MULTIPLE
             this.adapter = adapter
+            isFastScrollEnabled = true
+            isFastScrollAlwaysVisible = apps.size > 20
         }
         var pickerDialog: AlertDialog? = null
         val iconBox = CheckBox(this).apply {
@@ -936,7 +941,11 @@ class MainActivity : Activity() {
                 return tv
             }
         }
-        val list = ListView(this).apply { this.adapter = adapter }
+        val list = ListView(this).apply {
+            this.adapter = adapter
+            isFastScrollEnabled = true
+            isFastScrollAlwaysVisible = rows.size > 30
+        }
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(pathView)
@@ -1073,7 +1082,7 @@ class MainActivity : Activity() {
 
     private sealed class MusicCmd {
         object Show : MusicCmd()
-        data class Copy(val tracks: List<MusicLibrary.Track>) : MusicCmd()
+        data class Copy(val tracks: List<MusicLibrary.Track>, val writeTags: Boolean) : MusicCmd()
         object Close : MusicCmd()
     }
 
@@ -1099,7 +1108,7 @@ class MainActivity : Activity() {
                         is MusicCmd.Close -> break
                         is MusicCmd.Show -> runOnUiThread { showMusic(tracks, cmds) }
                         is MusicCmd.Copy -> {
-                            copySongs(afc, cmd.tracks)
+                            copySongs(afc, cmd.tracks, cmd.writeTags)
                             cmds.offer(MusicCmd.Show)
                         }
                     }
@@ -1156,7 +1165,24 @@ class MainActivity : Activity() {
             alpha = 0.7f
             setPadding(pad / 4, 0, pad / 4, pad / 4)
         }
-        val adapter = object : BaseAdapter() {
+        // Fast-scroll bubble shows the artist's first letter (the list is sorted by artist).
+        fun initial(t: MusicLibrary.Track) = t.artist.firstOrNull()?.uppercaseChar()?.let { if (it.isLetter()) "$it" else "#" } ?: "#"
+        var sections: Array<String> = emptyArray()
+        var sectionStarts: IntArray = IntArray(0)
+        val adapter = object : BaseAdapter(), android.widget.SectionIndexer {
+            override fun notifyDataSetChanged() {
+                val names = ArrayList<String>(); val starts = ArrayList<Int>()
+                visible.forEachIndexed { i, t -> val c = initial(t); if (names.lastOrNull() != c) { names += c; starts += i } }
+                sections = names.toTypedArray(); sectionStarts = starts.toIntArray()
+                super.notifyDataSetChanged()
+            }
+            override fun getSections(): Array<Any> = arrayOf(*sections)
+            override fun getPositionForSection(section: Int) = sectionStarts.getOrElse(section) { visible.size }
+            override fun getSectionForPosition(position: Int): Int {
+                var sec = 0
+                while (sec + 1 < sectionStarts.size && sectionStarts[sec + 1] <= position) sec++
+                return sec
+            }
             override fun getCount() = visible.size
             override fun getItem(position: Int) = visible[position]
             override fun getItemId(position: Int) = visible[position].pid
@@ -1174,7 +1200,11 @@ class MainActivity : Activity() {
                 return tv
             }
         }
-        val list = ListView(this).apply { this.adapter = adapter }
+        val list = ListView(this).apply {
+            this.adapter = adapter
+            isFastScrollEnabled = true
+            isFastScrollAlwaysVisible = true
+        }
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad / 2, pad, 0)
@@ -1261,17 +1291,32 @@ class MainActivity : Activity() {
                 append("They'll only play in iTunes/Apple Music on a computer authorized for that Apple ID.")
             }
         }
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val tagBox = CheckBox(this).apply {
+            text = "Write song info (title, artist, album, track…) into the files"
+            isChecked = prefs.getBoolean("write_tags", true)
+        }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(TextView(this@MainActivity).apply { text = msg; textSize = 15f })
+            addView(tagBox)
+        }
         var handled = false
         AlertDialog.Builder(this)
-            .setMessage(msg)
-            .setPositiveButton("Copy") { _, _ -> handled = true; cmds.offer(MusicCmd.Copy(chosen)) }
+            .setView(body)
+            .setPositiveButton("Copy") { _, _ ->
+                handled = true
+                prefs.edit().putBoolean("write_tags", tagBox.isChecked).apply()
+                cmds.offer(MusicCmd.Copy(chosen, tagBox.isChecked))
+            }
             .setNegativeButton("Back") { _, _ -> handled = true; cmds.offer(MusicCmd.Show) }
             .setOnDismissListener { if (!handled) { handled = true; cmds.offer(MusicCmd.Show) } }
             .show()
     }
 
     /** Worker thread: copies songs with Stop support, naming them "Artist - Title.ext". */
-    private fun copySongs(afc: AfcClient, tracks: List<MusicLibrary.Track>) {
+    private fun copySongs(afc: AfcClient, tracks: List<MusicLibrary.Track>, writeTags: Boolean) {
         val saver = IpaSaver(this)
         val used = HashSet<String>()
         var ok = 0
@@ -1289,7 +1334,31 @@ class MainActivity : Activity() {
                 log("[${i + 1}/${tracks.size}] $name")
                 val target = saver.create(name, MUSIC_SUBFOLDER)
                 try {
-                    afc.copyFile(t.devicePath, target.stream)
+                    if (writeTags && t.extension in TAGGABLE) {
+                        // Tagging needs random access, so stage the file in app cache first.
+                        val tmp = java.io.File(cacheDir, "song.tmp")
+                        try {
+                            java.io.FileOutputStream(tmp).use { afc.copyFile(t.devicePath, it) }
+                            val r = try {
+                                AudioTagger.writeTagged(tmp, t.extension, tagsFor(t), target.stream)
+                            } catch (e: Exception) {
+                                // Unusual file layout: save it untouched rather than failing.
+                                log("  couldn't write tags (${e.message}); saved as-is")
+                                target.discard()
+                                val plain = saver.create(name, MUSIC_SUBFOLDER)
+                                tmp.inputStream().use { it.copyTo(plain.stream) }
+                                plain.commit()
+                                ok++
+                                done = i + 1
+                                continue
+                            }
+                            if (r == AudioTagger.Result.ID3_KEPT) log("  (kept the file's existing ID3 tag)")
+                        } finally {
+                            tmp.delete()
+                        }
+                    } else {
+                        afc.copyFile(t.devicePath, target.stream)
+                    }
                     target.commit()
                     ok++
                 } catch (e: StopNowException) {
@@ -1315,6 +1384,20 @@ class MainActivity : Activity() {
             (if (stopped && done < tracks.size) ", ${tracks.size - done} not copied" else "") + ".")
         musicSelected.clear()
     }
+
+    private fun tagsFor(t: MusicLibrary.Track) = AudioTagger.Tags(
+        title = t.title,
+        artist = t.artist.takeIf { it != MusicLibrary.UNKNOWN_ARTIST },
+        album = t.album.takeIf { it != MusicLibrary.UNKNOWN_ALBUM },
+        albumArtist = t.albumArtist,
+        genre = t.genre,
+        composer = t.composer,
+        year = t.year,
+        track = t.trackNumber,
+        trackCount = t.trackCount,
+        disc = t.discNumber,
+        discCount = t.discCount,
+    )
 
     // ---------------------------------------------------------------- helpers
 

@@ -25,6 +25,13 @@ class MusicLibrary(private val db: SqlDb) {
         val devicePath: String,
         val size: Long,
         val trackNumber: Int,
+        val albumArtist: String? = null,
+        val genre: String? = null,
+        val composer: String? = null,
+        val year: Int = 0,
+        val trackCount: Int = 0,
+        val discNumber: Int = 0,
+        val discCount: Int = 0,
     ) {
         val extension: String get() = devicePath.substringAfterLast('.', "").lowercase()
         val isDrm: Boolean get() = extension == "m4p"
@@ -70,6 +77,10 @@ class MusicLibrary(private val db: SqlDb) {
         val location = col("location") ?: throw IOException("No location column. item: $ic, item_extra: $ec")
         val size = col("file_size") ?: "0"
         val track = col("track_number") ?: "0"
+        val year = col("year") ?: "0"
+        val trackCount = col("track_count") ?: "0"
+        val discNumber = col("disc_number") ?: "0"
+        val discCount = col("disc_count") ?: "0"
 
         val joins = StringBuilder()
         if (ec.isNotEmpty() && "item_pid" in ec) joins.append(" LEFT JOIN item_extra e ON e.item_pid = i.item_pid")
@@ -88,9 +99,12 @@ class MusicLibrary(private val db: SqlDb) {
         val albumArtist = joinIf("album_artist", "album_artist_pid", "album_artist_pid", "album_artist", "aa")
             ?: col("album_artist") ?: "NULL"
         val album = joinIf("album", "album_pid", "album_pid", "album", "al") ?: col("album") ?: "NULL"
+        val genre = joinIf("genre", "genre_id", "genre_id", "genre", "g") ?: col("genre") ?: "NULL"
+        val composer = joinIf("composer", "composer_pid", "composer_pid", "composer", "cp") ?: col("composer") ?: "NULL"
 
         val sql = "SELECT i.item_pid, $title, COALESCE(NULLIF($artist, ''), $albumArtist), $album, $base, " +
-            "$location, $size, $track FROM item i$joins"
+            "$location, $size, $track, $albumArtist, $genre, $composer, $year, $trackCount, $discNumber, $discCount " +
+            "FROM item i$joins"
 
         return db.query(sql).mapNotNull { r ->
             val loc = (r[5] as? String)?.trim().orEmpty()
@@ -106,6 +120,13 @@ class MusicLibrary(private val db: SqlDb) {
                 devicePath = path,
                 size = (r[6] as? Number)?.toLong() ?: 0L,
                 trackNumber = (r[7] as? Number)?.toInt() ?: 0,
+                albumArtist = (r[8] as? String)?.trim()?.ifEmpty { null },
+                genre = (r[9] as? String)?.trim()?.ifEmpty { null },
+                composer = (r[10] as? String)?.trim()?.ifEmpty { null },
+                year = (r[11] as? Number)?.toInt() ?: 0,
+                trackCount = (r[12] as? Number)?.toInt() ?: 0,
+                discNumber = (r[13] as? Number)?.toInt() ?: 0,
+                discCount = (r[14] as? Number)?.toInt() ?: 0,
             )
         }.sortedWith(
             compareBy<Track>({ it.artist.lowercase() }, { it.album.lowercase() }, { it.trackNumber }, { it.title.lowercase() })
