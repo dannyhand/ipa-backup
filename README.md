@@ -13,6 +13,7 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
 - **Jailbroken devices (AFC2):** if archiving fails, the app bundle is copied straight from the filesystem.
   **Browse files** shows the whole filesystem and saves any file or folder.
 - **Non-jailbroken devices:** Browse files shows the media folder (`/var/mobile/Media`)
+- **Stop anytime:** stop right away (the partial file is discarded) or after the current app finishes
 - Your apps stay installed on the device. The archive is made with `SkipUninstall`.
 
 ## Requirements

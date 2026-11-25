@@ -51,6 +51,7 @@ class MainActivity : Activity() {
 
     private lateinit var logView: TextView
     private lateinit var scroll: ScrollView
+    private lateinit var stopButton: Button
     private val usbManager by lazy { getSystemService(Context.USB_SERVICE) as UsbManager }
     private val prefs by lazy { getSharedPreferences("options", Context.MODE_PRIVATE) }
     @Volatile private var busy = false
@@ -96,9 +97,14 @@ class MainActivity : Activity() {
             addView(button("Browse files") { withDevice(::browseFiles) }, lp())
             addView(button("Copy log") { copyLog() }, lp())
         }
+        stopButton = button("Stop backup…") { confirmStop() }.apply {
+            visibility = android.view.View.GONE
+            setTextColor(0xFFC62828.toInt())
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(buttons)
+            addView(stopButton)
             addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
         // targetSdk 35 forces edge-to-edge; pad for the action bar + system bars.
@@ -329,25 +335,32 @@ class MainActivity : Activity() {
             includeData || !(skipSaved && IpaSaver.ipaName(app.name, app.version, app.bundleId) in savedNames)
         }
         if (todo.isEmpty()) { log("\nEverything selected is already saved. Nothing to do."); return }
+        if (busy) { log("Busy, please wait for the current operation to finish."); return }
         keepScreenOn(true)
+        stopMode = StopMode.NONE
+        setStopButtonVisible(true)
         val saver = IpaSaver(this)
         log("\nBacking up ${todo.size} app(s) to Download/${IpaSaver.FOLDER}/" + if (includeData) " (with app data)" else "")
 
-        runOnDevice(device) { mux, lockdown ->
+        runOnDevice(device, after = { setStopButtonVisible(false); stopMode = StopMode.NONE }) { mux, lockdown ->
             val afc2 = tryAfc2(mux, lockdown)
             if (afc2 != null) log("AFC2 available (jailbroken): will copy the app bundle directly if archiving fails.")
             try {
                 withService(mux, lockdown, InstallationProxy.SERVICE) { ipStream ->
                     withService(mux, lockdown, AfcClient.SERVICE) { afcStream ->
                         val ip = InstallationProxy(ipStream)
-                        val afc = AfcClient(afcStream)
-                        val afc2Client = afc2?.let { AfcClient(it) }
+                        val afc = AfcClient(afcStream).apply { cancelCheck = ::checkStopNow }
+                        val afc2Client = afc2?.let { AfcClient(it).apply { cancelCheck = ::checkStopNow } }
+                        removeLeftoverArchives(ip, afc)
+
                         var ipas = 0
                         var skipped = 0
                         var datas = 0
+                        var done = 0
                         val failed = mutableListOf<String>()
 
-                        todo.forEachIndexed { i, app ->
+                        for ((i, app) in todo.withIndex()) {
+                            if (stopMode != StopMode.NONE) break
                             log("\n[${i + 1}/${todo.size}] ${app.name} ${app.version}")
                             val ipaName = IpaSaver.ipaName(app.name, app.version, app.bundleId)
                             if (skipSaved && ipaName in savedNames) {
@@ -357,6 +370,9 @@ class MainActivity : Activity() {
                                 try {
                                     backupIpa(ip, afc, afc2Client, saver, app)
                                     ipas++
+                                } catch (e: StopNowException) {
+                                    log("  stopped; the partial file was discarded")
+                                    break
                                 } catch (e: Exception) {
                                     log("  FAILED: ${e.message}")
                                     failed += app.name
@@ -365,15 +381,23 @@ class MainActivity : Activity() {
                             if (includeData) {
                                 try {
                                     if (backupData(mux, lockdown, saver, app)) datas++
+                                } catch (e: StopNowException) {
+                                    log("  stopped; the partial data backup was discarded")
+                                    break
                                 } catch (e: Exception) {
                                     log("  data FAILED: ${e.message}")
                                     failed += "${app.name} (data)"
                                 }
                             }
+                            done = i + 1
                         }
-                        log("\nBackup finished: $ipas .ipa saved" +
+
+                        val remaining = todo.size - done
+                        val header = if (stopMode != StopMode.NONE) "\nBackup stopped" else "\nBackup finished"
+                        log("$header: $ipas .ipa saved" +
                             (if (skipped > 0) ", $skipped already saved" else "") +
                             (if (includeData) ", $datas data backups" else "") +
+                            (if (stopMode != StopMode.NONE && remaining > 0) ", $remaining not backed up" else "") +
                             (if (failed.isEmpty()) "." else "\nFailed: ${failed.joinToString()}"))
                     }
                 }
@@ -383,9 +407,26 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Deletes archives left in ApplicationArchives/ by an interrupted run (e.g. Stop now while
+     * the iPod was still archiving), so they don't eat the iPod's free space.
+     */
+    private fun removeLeftoverArchives(ip: InstallationProxy, afc: AfcClient) {
+        val leftovers = runCatching { afc.readDir("ApplicationArchives") }.getOrDefault(emptyList())
+            .filter { it.endsWith(".zip") }
+        if (leftovers.isEmpty()) return
+        var removed = 0
+        for (f in leftovers) {
+            if (runCatching { ip.removeArchive(f.removeSuffix(".zip")) }.isSuccess) removed++
+        }
+        log("Cleaned up $removed leftover archive(s) on the iPod.")
+    }
+
     private fun backupIpa(ip: InstallationProxy, afc: AfcClient, afc2: AfcClient?, saver: IpaSaver, app: InstallationProxy.App) {
         try {
             backupIpaViaArchive(ip, afc, saver, app)
+        } catch (e: StopNowException) {
+            throw e
         } catch (e: Exception) {
             if (afc2 == null) throw e
             log("  archive failed (${e.message}); copying the app bundle over AFC2 instead…")
@@ -398,8 +439,16 @@ class MainActivity : Activity() {
         runCatching { ip.removeArchive(app.bundleId) } // clear any leftover archive; fails harmlessly if none
 
         var lastPct = -1
-        ip.archive(app.bundleId) { status, pct ->
-            if (pct != null && pct / 25 > lastPct / 25) { lastPct = pct; log("  archiving… $pct% ($status)") }
+        try {
+            ip.archive(app.bundleId) { status, pct ->
+                checkStopNow()
+                if (pct != null && pct / 25 > lastPct / 25) { lastPct = pct; log("  archiving… $pct% ($status)") }
+            }
+        } catch (e: StopNowException) {
+            // The iPod keeps archiving in the background and this connection is mid-command, so don't
+            // send RemoveArchive now; the leftover is cleaned up at the start of the next backup.
+            log("  (the iPod may finish this archive in the background; it's deleted next time you back up)")
+            throw e
         }
 
         val target = saver.create(IpaSaver.ipaName(app.name, app.version, app.bundleId))
@@ -418,6 +467,45 @@ class MainActivity : Activity() {
             runCatching { ip.removeArchive(app.bundleId) }
                 .onFailure { log("  (couldn't delete the archive on the iPod: ${it.message})") }
         }
+    }
+
+    // ---------------------------------------------------------------- stopping
+
+    private enum class StopMode { NONE, AFTER_CURRENT, NOW }
+
+    private class StopNowException : RuntimeException("Stopped")
+
+    @Volatile private var stopMode = StopMode.NONE
+
+    /** Called from transfer loops and progress callbacks; aborts the current step on "Stop now". */
+    private fun checkStopNow() {
+        if (stopMode == StopMode.NOW) throw StopNowException()
+    }
+
+    private fun setStopButtonVisible(visible: Boolean) = runOnUiThread {
+        stopButton.visibility = if (visible) android.view.View.VISIBLE else android.view.View.GONE
+        stopButton.isEnabled = true
+        stopButton.text = "Stop backup…"
+    }
+
+    private fun confirmStop() {
+        if (stopMode == StopMode.NOW) return
+        AlertDialog.Builder(this)
+            .setTitle("Stop backup?")
+            .setMessage("Apps already saved are kept either way.")
+            .setPositiveButton("Stop now") { _, _ ->
+                stopMode = StopMode.NOW
+                stopButton.isEnabled = false
+                stopButton.text = "Stopping…"
+                log("\nStopping now…")
+            }
+            .setNeutralButton("After this app") { _, _ ->
+                stopMode = StopMode.AFTER_CURRENT
+                stopButton.text = "Stopping after this app… (tap to stop now)"
+                log("\nWill stop after the current app finishes.")
+            }
+            .setNegativeButton("Keep going", null)
+            .show()
     }
 
     /** Jailbreak fallback: zip Payload/<App>.app + iTunesMetadata.plist + iTunesArtwork straight from the filesystem. */
@@ -449,7 +537,7 @@ class MainActivity : Activity() {
     private fun backupData(mux: UsbMux, lockdown: LockdownClient, saver: IpaSaver, app: InstallationProxy.App): Boolean =
         withService(mux, lockdown, HouseArrest.SERVICE) { stream ->
             HouseArrest.vendContainer(stream, app.bundleId)
-            val afc = AfcClient(stream)
+            val afc = AfcClient(stream).apply { cancelCheck = ::checkStopNow }
             val wanted = setOf("Documents", "Library")
             if (afc.readDir("/").none { it in wanted }) {
                 log("  no app data")

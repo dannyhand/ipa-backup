@@ -43,6 +43,9 @@ class AfcClient(private val conn: ByteConnection) {
 
     private var packetNum = 0L
 
+    /** Called before every chunk of a file copy; throw from it to abort (e.g. user pressed Stop). */
+    @Volatile var cancelCheck: () -> Unit = {}
+
     private fun send(op: Long, params: ByteArray) {
         val thisLen = HEADER + params.size
         val bb = ByteBuffer.allocate(thisLen).order(ByteOrder.LITTLE_ENDIAN)
@@ -121,11 +124,13 @@ class AfcClient(private val conn: ByteConnection) {
 
     /** Copies a device file to [out]. [progress] gets (bytesCopied, totalBytes or -1). Returns bytes copied. */
     fun copyFile(path: String, out: OutputStream, progress: (Long, Long) -> Unit = { _, _ -> }): Long {
+        cancelCheck()
         val total = fileInfo(path)["st_size"]?.toLongOrNull() ?: -1L
         val handle = open(path)
         var copied = 0L
         try {
             while (true) {
+                cancelCheck()
                 val chunk = read(handle)
                 if (chunk.isEmpty()) break
                 out.write(chunk)

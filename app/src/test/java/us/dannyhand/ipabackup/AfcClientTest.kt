@@ -27,6 +27,8 @@ class FakeAfcDevice(private val files: Map<String, ByteArray>) : ByteConnection 
     private fun le(vararg v: Long) = ByteBuffer.allocate(8 * v.size).order(ByteOrder.LITTLE_ENDIAN).apply { v.forEach { putLong(it) } }.array()
     private fun status(code: Long) = packet(AfcClient.OP_STATUS, le(code))
 
+    val openHandles get() = openFiles.size
+
     private fun isDir(p: String) = files.keys.any { it.startsWith(p.trimEnd('/') + "/") }
 
     override fun write(data: ByteArray) {
@@ -83,6 +85,24 @@ class AfcClientTest {
         assertEquals(content.size.toLong(), n)
         assertArrayEquals(content, out.toByteArray())
         assertEquals(content.size.toLong() to content.size.toLong(), lastProgress)
+    }
+
+    @Test
+    fun cancelCheckAbortsMidCopyAndClosesHandle() {
+        val content = Random(7).nextBytes(AfcClient.READ_CHUNK * 5)
+        val device = FakeAfcDevice(mapOf("big.zip" to content))
+        val afc = AfcClient(device)
+        var chunks = 0
+        afc.cancelCheck = { if (chunks >= 2) throw IllegalStateException("stop") }
+        val out = ByteArrayOutputStream()
+        assertThrows(IllegalStateException::class.java) {
+            afc.copyFile("big.zip", out) { _, _ -> chunks++ }
+        }
+        assertEquals(AfcClient.READ_CHUNK * 2, out.size())
+        assertEquals(0, device.openHandles)
+        // Connection is still in sync: a fresh copy works after cancelling.
+        afc.cancelCheck = {}
+        assertEquals(content.size.toLong(), afc.copyFile("big.zip", ByteArrayOutputStream()))
     }
 
     @Test
