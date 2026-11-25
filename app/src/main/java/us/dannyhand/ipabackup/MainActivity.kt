@@ -15,9 +15,13 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.util.TypedValue
+import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.ArrayAdapter
+import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.LinearLayout
@@ -27,6 +31,9 @@ import android.widget.TextView
 import android.widget.Toast
 import us.dannyhand.ipabackup.afc.AfcClient
 import us.dannyhand.ipabackup.afc.AfcZipper
+import us.dannyhand.ipabackup.afc.CancelledException
+import us.dannyhand.ipabackup.afc.TreeSize
+import us.dannyhand.ipabackup.afc.measureTree
 import us.dannyhand.ipabackup.housearrest.HouseArrest
 import us.dannyhand.ipabackup.instproxy.InstallationProxy
 import us.dannyhand.ipabackup.lockdown.LockdownClient
@@ -98,7 +105,7 @@ class MainActivity : Activity() {
             addView(button("Copy log") { copyLog() }, lp())
         }
         stopButton = button("Stop backup…") { confirmStop() }.apply {
-            visibility = android.view.View.GONE
+            visibility = View.GONE
             setTextColor(0xFFC62828.toInt())
         }
         val root = LinearLayout(this).apply {
@@ -348,8 +355,68 @@ class MainActivity : Activity() {
                 val checked = list.checkedItemPositions
                 start(apps.filterIndexed { i, _ -> checked.get(i) })
             }
-            .setNeutralButton("Back up all") { _, _ -> start(apps) }
+            .setNeutralButton("Back up all") { _, _ ->
+                prefs.edit().putBoolean("skip_saved", skipBox.isChecked).putBoolean("include_data", dataBox.isChecked).apply()
+                confirmBackupAll(device, apps, saved, skipBox.isChecked, dataBox.isChecked)
+            }
             .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** "Back up all" safety check: what will run, how big it'll be, and whether the phone has room. */
+    private fun confirmBackupAll(
+        device: UsbDevice,
+        apps: List<InstallationProxy.App>,
+        saved: Set<String>,
+        skipSaved: Boolean,
+        includeData: Boolean,
+    ) {
+        val toArchive = apps.filter { !(skipSaved && IpaSaver.ipaName(it.name, it.version, it.bundleId) in saved) }
+        val alreadySaved = apps.size - toArchive.size
+        if (toArchive.isEmpty() && !includeData) {
+            AlertDialog.Builder(this)
+                .setMessage("All ${apps.size} apps are already saved. Uncheck \"Skip apps already saved\" to back them up again.")
+                .setPositiveButton("OK") { _, _ -> showPicker(device, apps) }
+                .setOnCancelListener { showPicker(device, apps) }
+                .show()
+            return
+        }
+
+        val installed = toArchive.sumOf { it.sizeBytes }
+        // .ipa archives come out at roughly 90-95% of the installed size (see test backups).
+        val estimate = (installed * 0.95).toLong()
+        val largest = toArchive.maxByOrNull { it.sizeBytes }
+        val free = runCatching {
+            android.os.StatFs(android.os.Environment.getExternalStorageDirectory().path).availableBytes
+        }.getOrDefault(-1L)
+
+        val msg = buildString {
+            append("Back up ${toArchive.size} app${if (toArchive.size == 1) "" else "s"}")
+            if (alreadySaved > 0) append(" (skipping $alreadySaved already saved)")
+            append("?\n\n")
+            append("Estimated size: about ${humanSize(estimate)}\n")
+            append("(${humanSize(installed)} installed on the iPod)\n")
+            if (includeData) append("Plus app data for ${apps.size} apps (size known only once it's copied)\n")
+            if (free >= 0) {
+                append("\nFree space on this phone: ${humanSize(free)}\n")
+                if (estimate > free) append("⚠️ Not enough space for everything. The backup will fail partway.\n")
+                else if (estimate > free * 0.8) append("⚠️ This will use most of your free space.\n")
+            }
+            if (largest != null && largest.sizeBytes > 0) {
+                append("\nThe iPod needs free space for one archive at a time (largest: ${largest.name}, ${humanSize(largest.sizeBytes)}).\n")
+            }
+            append("\nKeep both devices connected. You can stop at any time.")
+        }
+        var handled = false
+        AlertDialog.Builder(this)
+            .setTitle("Back up all apps?")
+            .setMessage(msg)
+            .setPositiveButton("Back up") { _, _ ->
+                handled = true
+                backup(device, apps, skipSaved, includeData, saved)
+            }
+            .setNegativeButton("Back") { _, _ -> handled = true; showPicker(device, apps) }
+            .setOnDismissListener { if (!handled) showPicker(device, apps) }
             .show()
     }
 
@@ -512,7 +579,7 @@ class MainActivity : Activity() {
     }
 
     private fun setStopButtonVisible(visible: Boolean) = runOnUiThread {
-        stopButton.visibility = if (visible) android.view.View.VISIBLE else android.view.View.GONE
+        stopButton.visibility = if (visible) View.VISIBLE else View.GONE
         stopButton.isEnabled = true
         stopButton.text = "Stop backup…"
     }
@@ -590,13 +657,21 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- file browser
 
+    private data class BrowserItem(val path: String, val isDir: Boolean, val size: Long)
+
     private sealed class BrowserCmd {
-        data class List(val path: String) : BrowserCmd()
-        data class Download(val path: String, val isDir: Boolean, val returnTo: String) : BrowserCmd()
+        data class Open(val path: String) : BrowserCmd()
+        /** Measure any folders in [items], then ask the user to confirm saving them all. */
+        data class Prepare(val items: List<BrowserItem>, val returnTo: String) : BrowserCmd()
+        data class Download(val items: List<BrowserItem>, val returnTo: String) : BrowserCmd()
         object Close : BrowserCmd()
     }
 
     private data class BrowserEntry(val name: String, val entry: AfcClient.Entry?)
+
+    @Volatile private var measureCancelled = false
+    private var measureDialog: AlertDialog? = null
+    private var measureText: TextView? = null
 
     /** Root filesystem via AFC2 when jailbroken, else the media folder via regular AFC. */
     private fun browseFiles(device: UsbDevice) {
@@ -619,31 +694,37 @@ class MainActivity : Activity() {
             stream.use {
                 val afc = AfcClient(stream)
                 val saver = IpaSaver(this)
-                cmds.offer(BrowserCmd.List("/"))
+                cmds.offer(BrowserCmd.Open("/"))
                 while (true) {
                     // Close quietly if left idle.
                     val cmd = cmds.poll(15, TimeUnit.MINUTES) ?: break
                     when (cmd) {
                         is BrowserCmd.Close -> break
-                        is BrowserCmd.List -> {
+                        is BrowserCmd.Open -> {
                             val entries = try {
                                 afc.readDir(cmd.path).sortedBy { it.lowercase() }.map { name ->
                                     BrowserEntry(name, runCatching { afc.stat(join(cmd.path, name)) }.getOrNull())
                                 }
                             } catch (e: Exception) {
                                 log("Can't open ${cmd.path}: ${e.message}")
-                                if (cmd.path != "/") cmds.offer(BrowserCmd.List(parent(cmd.path))) else break
+                                if (cmd.path != "/") cmds.offer(BrowserCmd.Open(parent(cmd.path))) else break
                                 continue
                             }
                             runOnUiThread { showBrowser(label, cmd.path, entries, cmds) }
                         }
+                        is BrowserCmd.Prepare -> prepareSave(afc, cmd, cmds)
                         is BrowserCmd.Download -> {
-                            try {
-                                downloadPath(afc, saver, cmd.path, cmd.isDir)
-                            } catch (e: Exception) {
-                                log("Download failed: ${e.message}")
+                            val many = cmd.items.size > 1
+                            cmd.items.forEachIndexed { i, item ->
+                                if (many) log("[${i + 1}/${cmd.items.size}] ${item.path}")
+                                try {
+                                    downloadPath(afc, saver, item.path, item.isDir)
+                                } catch (e: Exception) {
+                                    log("Download failed: ${e.message}")
+                                }
                             }
-                            cmds.offer(BrowserCmd.List(cmd.returnTo))
+                            if (many) log("Saved ${cmd.items.size} items.")
+                            cmds.offer(BrowserCmd.Open(cmd.returnTo))
                         }
                     }
                 }
@@ -652,52 +733,253 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showBrowser(label: String, path: String, entries: List<BrowserEntry>, cmds: LinkedBlockingQueue<BrowserCmd>) {
-        if (isFinishing) { cmds.offer(BrowserCmd.Close); return }
-        val atRoot = path == "/"
-        val rows = mutableListOf<String>()
-        if (!atRoot) rows += "⬆  .."
-        entries.forEach { (name, e) ->
-            rows += when {
-                e == null -> "?  $name"
-                e.isDir -> "📁  $name"
-                e.isLink -> "↪  $name"
-                else -> "📄  $name  (${humanSize(e.size)})"
+    /** Worker thread: totals the selection (walking folders, with a cancellable progress dialog), then asks to confirm. */
+    private fun prepareSave(afc: AfcClient, cmd: BrowserCmd.Prepare, cmds: LinkedBlockingQueue<BrowserCmd>) {
+        val dirs = cmd.items.filter { it.isDir }
+        val files = cmd.items.filter { !it.isDir }
+        measureCancelled = false
+        if (dirs.isNotEmpty()) showMeasuring()
+        try {
+            val folders = TreeSize()
+            for (d in dirs) {
+                val before = folders.copy()
+                folders.add(afc.measureTree(
+                    d.path,
+                    zipPrefix = zipBaseName(d.path) + "/",
+                    onProgress = { t -> if (t.files % 20 == 0) updateMeasuring(before.files + t.files, before.bytes + t.bytes) },
+                    isCancelled = { measureCancelled },
+                ))
             }
+            dismissMeasuring()
+            val msg = saveSummary(files, dirs, folders)
+            runOnUiThread { confirmSave(msg, cmd, cmds) }
+        } catch (e: CancelledException) {
+            dismissMeasuring()
+            cmds.offer(BrowserCmd.Open(cmd.returnTo))
+        } catch (e: Exception) {
+            dismissMeasuring()
+            log("Couldn't measure: ${e.message}")
+            cmds.offer(BrowserCmd.Open(cmd.returnTo))
         }
-        if (entries.isEmpty()) rows += "(empty)"
-
-        val b = AlertDialog.Builder(this)
-            .setTitle("$label  $path")
-            .setItems(rows.toTypedArray()) { _, which ->
-                val idx = if (atRoot) which else which - 1
-                if (idx < 0) { cmds.offer(BrowserCmd.List(parent(path))); return@setItems }
-                val be = entries.getOrNull(idx) ?: run { cmds.offer(BrowserCmd.List(path)); return@setItems }
-                val full = join(path, be.name)
-                val e = be.entry
-                when {
-                    e == null || e.isDir || e.isLink -> cmds.offer(BrowserCmd.List(full)) // links: try to open as folder
-                    else -> confirmDownload(full, e.size, false, path, cmds)
-                }
-            }
-            .setNegativeButton("Close") { _, _ -> cmds.offer(BrowserCmd.Close) }
-            .setOnCancelListener { cmds.offer(BrowserCmd.Close) }
-        if (!atRoot) b.setNeutralButton("Save folder (.zip)") { _, _ -> confirmDownload(path, -1, true, path, cmds) }
-        b.show()
     }
 
-    private fun confirmDownload(path: String, size: Long, isDir: Boolean, returnTo: String, cmds: LinkedBlockingQueue<BrowserCmd>) {
-        val what = if (isDir) "the folder ${path.substringAfterLast('/')} as a .zip" else "${path.substringAfterLast('/')} (${humanSize(size)})"
+    private fun saveSummary(files: List<BrowserItem>, dirs: List<BrowserItem>, folders: TreeSize): String = buildString {
+        val fileBytes = files.sumOf { it.size }
+        when {
+            dirs.isEmpty() && files.size == 1 ->
+                append("Save ${files[0].path.substringAfterLast('/')} (${humanSize(fileBytes)})?")
+            files.isEmpty() && dirs.size == 1 -> {
+                val name = zipBaseName(dirs[0].path)
+                append("Save the folder “$name” as $name.zip?\n\n")
+                append("${folders.files} files, ${humanSize(folders.bytes)} uncompressed\n")
+                append("Estimated .zip size: about ${humanSize(folders.estimatedZipBytes)}")
+            }
+            else -> {
+                append("Save ${files.size + dirs.size} items?\n\n")
+                if (files.isNotEmpty()) append("• ${files.size} file(s): ${humanSize(fileBytes)}\n")
+                if (dirs.isNotEmpty()) {
+                    append("• ${dirs.size} folder(s) as .zip: ${folders.files} files, ${humanSize(folders.bytes)} uncompressed, ")
+                    append("about ${humanSize(folders.estimatedZipBytes)} zipped\n")
+                }
+                append("\nTotal: about ${humanSize(fileBytes + folders.estimatedZipBytes)}")
+            }
+        }
+        append("\n\nSaves to Download/${IpaSaver.FOLDER}/$FILES_SUBFOLDER/")
+    }
+
+    private fun confirmSave(msg: String, cmd: BrowserCmd.Prepare, cmds: LinkedBlockingQueue<BrowserCmd>) {
+        var handled = false
         AlertDialog.Builder(this)
-            .setMessage("Save $what to Download/${IpaSaver.FOLDER}/$FILES_SUBFOLDER/?")
-            .setPositiveButton("Save") { _, _ -> cmds.offer(BrowserCmd.Download(path, isDir, returnTo)) }
-            .setNegativeButton("Back") { _, _ -> cmds.offer(BrowserCmd.List(returnTo)) }
-            .setOnCancelListener { cmds.offer(BrowserCmd.List(returnTo)) }
+            .setMessage(msg)
+            .setPositiveButton("Save") { _, _ -> handled = true; cmds.offer(BrowserCmd.Download(cmd.items, cmd.returnTo)) }
+            .setNegativeButton("Back") { _, _ -> handled = true; cmds.offer(BrowserCmd.Open(cmd.returnTo)) }
+            .setOnDismissListener { if (!handled) { handled = true; cmds.offer(BrowserCmd.Open(cmd.returnTo)) } }
             .show()
     }
 
+    private fun showMeasuring() = runOnUiThread {
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val tv = TextView(this).apply { text = "Counting files…"; setPadding(pad, pad / 2, pad, 0) }
+        measureText = tv
+        measureDialog = AlertDialog.Builder(this)
+            .setTitle("Measuring folder")
+            .setView(tv)
+            .setNegativeButton("Cancel") { _, _ -> measureCancelled = true }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun updateMeasuring(files: Int, bytes: Long) = runOnUiThread {
+        measureText?.text = "Counting files…\n$files files, ${humanSize(bytes)} so far"
+    }
+
+    private fun dismissMeasuring() = runOnUiThread {
+        measureDialog?.dismiss()
+        measureDialog = null
+        measureText = null
+    }
+
+    /**
+     * Folder view: tap opens folders / saves a file; hold starts multi-select (tap then toggles).
+     * The current path is shown as selectable text. Back goes up a folder (or clears the selection).
+     */
+    private fun showBrowser(label: String, path: String, entries: List<BrowserEntry>, cmds: LinkedBlockingQueue<BrowserCmd>) {
+        if (isFinishing) { cmds.offer(BrowserCmd.Close); return }
+        val atRoot = path == "/"
+        val density = resources.displayMetrics.density
+        val pad = (16 * density).toInt()
+        val selected = linkedSetOf<Int>() // indices into entries
+        var selecting = false
+        // Row codes: -1 = "..", -2 = "(empty)", otherwise an index into entries.
+        val rows: List<Int> = (if (atRoot) emptyList() else listOf(-1)) + entries.indices +
+            (if (entries.isEmpty()) listOf(-2) else emptyList())
+
+        fun selectable(i: Int) = i >= 0 && entries[i].entry?.let { !it.isLink } == true
+
+        val pathView = TextView(this).apply {
+            text = path
+            setTextIsSelectable(true)
+            typeface = Typeface.MONOSPACE
+            textSize = 13f
+            setPadding(pad, pad / 2, pad, pad / 4)
+        }
+        val hintView = TextView(this).apply {
+            textSize = 12f
+            alpha = 0.7f
+            setPadding(pad, 0, pad, pad / 4)
+        }
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = rows.size
+            override fun getItem(position: Int) = rows[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val tv = convertView as? TextView ?: TextView(this@MainActivity).apply {
+                    val v = (12 * density).toInt()
+                    setPadding(pad, v, pad, v)
+                    textSize = 15f
+                }
+                val i = rows[position]
+                tv.text = when (i) {
+                    -1 -> "⬆  .."
+                    -2 -> "(empty)"
+                    else -> {
+                        val (name, e) = entries[i]
+                        val box = if (selecting && selectable(i)) (if (i in selected) "☑ " else "☐ ") else ""
+                        val icon = when { e == null -> "?"; e.isDir -> "📁"; e.isLink -> "↪"; else -> "📄" }
+                        val size = if (e != null && !e.isDir && !e.isLink) "  (${humanSize(e.size)})" else ""
+                        "$box$icon  $name$size"
+                    }
+                }
+                tv.setBackgroundColor(if (i >= 0 && i in selected) 0x331E88E5 else 0)
+                return tv
+            }
+        }
+        val list = ListView(this).apply { this.adapter = adapter }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(pathView)
+            addView(hintView)
+            addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.55).toInt()))
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(label)
+            .setView(container)
+            .setPositiveButton("Save", null)
+            .setNeutralButton("Save folder (.zip)", null)
+            .setNegativeButton("Close", null)
+            .create()
+
+        var handled = false // exactly one command per dialog
+        fun go(cmd: BrowserCmd) {
+            if (!handled) { handled = true; cmds.offer(cmd) }
+            dialog.dismiss()
+        }
+
+        fun refresh() {
+            adapter.notifyDataSetChanged()
+            val pos = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            val neu = dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
+            if (selecting) {
+                hintView.text = "${selected.size} selected · tap to check or uncheck"
+                pos.visibility = View.VISIBLE
+                pos.isEnabled = selected.isNotEmpty()
+                pos.text = "Save ${selected.size}"
+                neu.visibility = View.VISIBLE
+                neu.text = "Cancel selection"
+            } else {
+                hintView.text = "Tap to open · hold to select several"
+                pos.visibility = View.GONE
+                neu.visibility = if (atRoot) View.GONE else View.VISIBLE
+                neu.text = "Save folder (.zip)"
+            }
+        }
+
+        fun clearSelection() {
+            selecting = false
+            selected.clear()
+            refresh()
+        }
+
+        list.setOnItemClickListener { _, _, position, _ ->
+            val i = rows[position]
+            when {
+                i == -2 -> {}
+                i == -1 -> if (!selecting) go(BrowserCmd.Open(parent(path)))
+                selecting -> if (selectable(i)) {
+                    if (!selected.add(i)) selected.remove(i)
+                    refresh()
+                }
+                else -> {
+                    val (name, e) = entries[i]
+                    val full = join(path, name)
+                    if (e == null || e.isDir || e.isLink) go(BrowserCmd.Open(full)) // links: try to open as folder
+                    else go(BrowserCmd.Prepare(listOf(BrowserItem(full, false, e.size)), path))
+                }
+            }
+        }
+        list.setOnItemLongClickListener { _, _, position, _ ->
+            val i = rows[position]
+            if (selectable(i)) {
+                selecting = true
+                if (!selected.add(i)) selected.remove(i)
+                refresh()
+            } else if (i >= 0) {
+                Toast.makeText(this, "Links can't be selected", Toast.LENGTH_SHORT).show()
+            }
+            true
+        }
+
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val items = selected.sorted().mapNotNull { i ->
+                    val (name, e) = entries[i]
+                    e?.let { BrowserItem(join(path, name), it.isDir, it.size) }
+                }
+                if (items.isNotEmpty()) go(BrowserCmd.Prepare(items, path))
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                if (selecting) clearSelection() else go(BrowserCmd.Prepare(listOf(BrowserItem(path, true, 0)), path))
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener { go(BrowserCmd.Close) }
+            refresh()
+        }
+        dialog.setOnKeyListener { _, keyCode, event ->
+            if (keyCode != KeyEvent.KEYCODE_BACK) return@setOnKeyListener false
+            if (!selecting && atRoot) return@setOnKeyListener false // normal back: closes the browser
+            if (event.action == KeyEvent.ACTION_UP) {
+                if (selecting) clearSelection() else go(BrowserCmd.Open(parent(path)))
+            }
+            true
+        }
+        dialog.setOnCancelListener { if (!handled) { handled = true; cmds.offer(BrowserCmd.Close) } }
+        dialog.show()
+    }
+
+    private fun zipBaseName(path: String) = IpaSaver.clean(path.trimEnd('/').substringAfterLast('/').ifEmpty { "root" })
+
     private fun downloadPath(afc: AfcClient, saver: IpaSaver, path: String, isDir: Boolean) {
-        val base = IpaSaver.clean(path.trimEnd('/').substringAfterLast('/').ifEmpty { "root" })
+        val base = zipBaseName(path)
         if (isDir) {
             val target = saver.create("$base.zip", FILES_SUBFOLDER)
             try {
@@ -707,7 +989,7 @@ class MainActivity : Activity() {
                 z.addTree(path, "$base/")
                 zos.finish()
                 target.commit()
-                log("Saved ${target.location} (${z.files} files, ${mb(z.bytes)})")
+                log("Saved ${target.location} (${z.files} files, ${humanSize(z.bytes)} uncompressed)")
             } catch (e: Exception) {
                 target.discard()
                 throw e

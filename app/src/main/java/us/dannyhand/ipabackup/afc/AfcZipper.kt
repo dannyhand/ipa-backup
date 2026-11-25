@@ -78,3 +78,77 @@ class AfcZipper(
         fun open(out: OutputStream) = ZipOutputStream(out)
     }
 }
+
+/** Totals for a device folder, with a rough estimate of how big a .zip of it would be. */
+data class TreeSize(var files: Int = 0, var bytes: Long = 0, var estimatedZipBytes: Long = 0) {
+    fun add(other: TreeSize) {
+        files += other.files
+        bytes += other.bytes
+        estimatedZipBytes += other.estimatedZipBytes
+    }
+}
+
+object ZipEstimate {
+    /** Formats that are already compressed: deflate gains ~nothing. */
+    private val COMPRESSED = setOf(
+        "png", "jpg", "jpeg", "gif", "mp3", "m4a", "aac", "mp4", "m4v", "mov", "zip", "ipa", "gz",
+        "bz2", "xz", "7z", "pvr", "pvrtc", "ogg", "caf", "car", "jar", "apk", "deb", "dmg",
+    )
+    /** Text-like formats: usually shrink to about a third. */
+    private val TEXT = setOf(
+        "plist", "strings", "txt", "xml", "json", "html", "htm", "css", "js", "log", "csv",
+        "md", "h", "c", "m", "lua", "ini", "cfg", "svg",
+    )
+
+    fun ratio(name: String): Double {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return when (ext) {
+            in COMPRESSED -> 1.0
+            in TEXT -> 0.35
+            else -> 0.65 // binaries, databases, nibs, fonts
+        }
+    }
+
+    /** Per-entry zip overhead: local header + central directory record + the name twice. */
+    fun entryOverhead(zipPath: String) = 30L + 46L + 2L * zipPath.toByteArray().size
+
+    fun estimateFile(zipPath: String, size: Long) = (size * ratio(zipPath)).toLong() + entryOverhead(zipPath)
+}
+
+class CancelledException : RuntimeException("Cancelled")
+
+/**
+ * Walks [path] on the device, totalling files and bytes (symlinks skipped, like AfcZipper).
+ * [onProgress] is called after each file; [isCancelled] is polled to abort with CancelledException.
+ */
+fun AfcClient.measureTree(
+    path: String,
+    zipPrefix: String = path.trimEnd('/').substringAfterLast('/') + "/",
+    onProgress: (TreeSize) -> Unit = {},
+    isCancelled: () -> Boolean = { false },
+): TreeSize {
+    val total = TreeSize()
+    fun walk(p: String, zipPath: String) {
+        for (name in readDir(p)) {
+            if (isCancelled()) throw CancelledException()
+            val child = if (p.endsWith("/")) p + name else "$p/$name"
+            val e = runCatching { stat(child) }.getOrNull() ?: continue
+            when {
+                e.isLink -> {}
+                e.isDir -> {
+                    total.estimatedZipBytes += ZipEstimate.entryOverhead("$zipPath$name/")
+                    walk(child, "$zipPath$name/")
+                }
+                else -> {
+                    total.files++
+                    total.bytes += e.size
+                    total.estimatedZipBytes += ZipEstimate.estimateFile("$zipPath$name", e.size)
+                    onProgress(total)
+                }
+            }
+        }
+    }
+    total.estimatedZipBytes += 22 + ZipEstimate.entryOverhead(zipPrefix) // end-of-central-directory + folder entry
+    walk(path, zipPrefix)
+    return total
+}

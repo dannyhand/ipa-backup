@@ -6,6 +6,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 import us.dannyhand.ipabackup.afc.AfcClient
 import us.dannyhand.ipabackup.afc.AfcException
+import us.dannyhand.ipabackup.afc.measureTree
 import us.dannyhand.ipabackup.service.ByteConnection
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -169,5 +170,44 @@ class AfcZipperTest {
         assertEquals(setOf("Documents/", "Documents/save.dat", "Library/", "Library/Preferences/",
             "Library/Preferences/com.foo.plist"), entries.keys)
         assertArrayEquals("progress".toByteArray(), entries["Documents/save.dat"])
+    }
+}
+
+class MeasureTreeTest {
+    @Test
+    fun totalsFilesAndEstimatesNearRealZipSize() {
+        // Mix of incompressible (random .png) and very compressible (repetitive .plist) data.
+        val tree = mapOf(
+            "/d/a.png" to Random(3).nextBytes(200_000),
+            "/d/sub/b.plist" to "<key>level</key><integer>7</integer>\n".repeat(3000).toByteArray(),
+            "/d/sub/deeper/c.bin" to Random(4).nextBytes(50_000),
+        )
+        val afc = AfcClient(FakeAfcDevice(tree))
+        var progressCalls = 0
+        val size = afc.measureTree("/d", onProgress = { progressCalls++ })
+        assertEquals(3, size.files)
+        assertEquals(tree.values.sumOf { it.size.toLong() }, size.bytes)
+        assertEquals(3, progressCalls)
+
+        // Compare with a real zip of the same folder.
+        val out = ByteArrayOutputStream()
+        us.dannyhand.ipabackup.afc.AfcZipper.open(out).use { zos ->
+            us.dannyhand.ipabackup.afc.AfcZipper(AfcClient(FakeAfcDevice(tree)), zos).addTree("/d", "d/")
+        }
+        val actual = out.size().toLong()
+        println("estimate=${size.estimatedZipBytes} actual=$actual uncompressed=${size.bytes}")
+        // Estimate should be in the right ballpark: never below the real size by much, and well under raw size + 25%.
+        assert(size.estimatedZipBytes >= actual * 0.8) { "estimate ${size.estimatedZipBytes} too low vs $actual" }
+        assert(size.estimatedZipBytes <= size.bytes * 1.25) { "estimate too high" }
+    }
+
+    @Test
+    fun cancelStopsWalk() {
+        val tree = (1..20).associate { "/d/f$it.txt" to "x".toByteArray() }
+        val afc = AfcClient(FakeAfcDevice(tree))
+        var n = 0
+        assertThrows(us.dannyhand.ipabackup.afc.CancelledException::class.java) {
+            afc.measureTree("/d", onProgress = { n++ }, isCancelled = { n >= 5 })
+        }
     }
 }
