@@ -1225,7 +1225,10 @@ class MainActivity : Activity() {
             android.database.sqlite.SQLiteDatabase.openDatabase(
                 java.io.File(dir, "MediaLibrary.sqlitedb").path, null,
                 android.database.sqlite.SQLiteDatabase.OPEN_READWRITE, // it's our private copy
-            ).use { db -> MusicLibrary(AndroidSqlDb(db)).load() }
+            ).use { db ->
+                val lib = MusicLibrary(AndroidSqlDb(db))
+                lib.load().also { log("(library: ${lib.diagnostics})") }
+            }
         } catch (e: Exception) {
             log("Couldn't read the music library: ${e.message}")
             null

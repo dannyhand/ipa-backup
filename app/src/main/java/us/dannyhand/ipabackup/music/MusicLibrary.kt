@@ -57,6 +57,20 @@ class MusicLibrary(private val db: SqlDb) {
         const val RINGTONES_DIR = "/iTunes_Control/Ringtones"
         const val RINGTONES_PLIST = "/iTunes_Control/iTunes/Ringtones.plist"
 
+        /** Per-item yes/no columns some iOS versions keep, in priority order. */
+        val FLAG_KINDS = linkedMapOf(
+            "is_podcast" to Kind.PODCAST,
+            "is_audio_book" to Kind.AUDIOBOOK,
+            "is_itunes_u" to Kind.ITUNES_U,
+            "is_music_video" to Kind.VIDEO,
+            "is_movie" to Kind.VIDEO,
+            "is_tv_show" to Kind.VIDEO,
+            "is_home_video" to Kind.VIDEO,
+            "is_ringtone" to Kind.RINGTONE,
+            "is_tone" to Kind.RINGTONE,
+            "is_song" to Kind.MUSIC,
+        )
+
         /**
          * MediaLibrary's media_type uses MPMediaType bits: 1 music, 2 podcast, 4 audiobook, 8 iTunes U,
          * 0x100 movie, 0x200 TV show, 0x400 video podcast, 0x800 music video, 0x1000 iTunes U video,
@@ -65,6 +79,7 @@ class MusicLibrary(private val db: SqlDb) {
         fun kindOf(mediaType: Int?, ext: String, audibleFlag: Boolean = false, genre: String? = null): Kind {
             val mt = mediaType ?: 0
             return when {
+                genre.equals("Podcast", ignoreCase = true) -> Kind.PODCAST
                 mt and 0x400 != 0 -> Kind.PODCAST
                 mt and 0x1000 != 0 -> Kind.ITUNES_U
                 mt and 0x2B00 != 0 -> Kind.VIDEO
@@ -72,7 +87,6 @@ class MusicLibrary(private val db: SqlDb) {
                 mt and 0x4 != 0 || audibleFlag || ext == "m4b" || ext == "aa" -> Kind.AUDIOBOOK
                 mt and 0x8 != 0 -> Kind.ITUNES_U
                 mt == 0 && ext in VIDEO_EXTENSIONS -> Kind.VIDEO
-                mt == 0 && genre.equals("Podcast", ignoreCase = true) -> Kind.PODCAST
                 else -> Kind.MUSIC
             }
         }
@@ -128,6 +142,10 @@ class MusicLibrary(private val db: SqlDb) {
         }
     }
 
+    /** Summary of how items were classified, for the log. */
+    var diagnostics: String = ""
+        private set
+
     fun load(): List<Track> {
         val tables = db.tables()
         if ("item" !in tables) throw IOException("Not a media library (no item table). Tables: $tables")
@@ -149,6 +167,8 @@ class MusicLibrary(private val db: SqlDb) {
         val discCount = col("disc_count") ?: "0"
         val mediaType = col("media_type") ?: "NULL"
         val audible = col("is_audible_audio_book") ?: "0"
+        val flagCols = FLAG_KINDS.keys.filter { it in ic || it in ec }
+        val flagSel = flagCols.joinToString("") { ", " + col(it) }
 
         val joins = StringBuilder()
         if (ec.isNotEmpty() && "item_pid" in ec) joins.append(" LEFT JOIN item_extra e ON e.item_pid = i.item_pid")
@@ -172,33 +192,64 @@ class MusicLibrary(private val db: SqlDb) {
 
         val sql = "SELECT i.item_pid, $title, COALESCE(NULLIF($artist, ''), $albumArtist), $album, $base, " +
             "$location, $size, $track, $albumArtist, $genre, $composer, $year, $trackCount, $discNumber, $discCount, " +
-            "$mediaType, $audible " +
+            "$mediaType, $audible$flagSel " +
             "FROM item i$joins"
 
-        return db.query(sql).mapNotNull { r ->
+        class Raw(val track: Track, val mediaType: Int?, val audible: Boolean, val flags: List<Boolean>)
+        val raws = db.query(sql).mapNotNull { r ->
             val loc = (r[5] as? String)?.trim().orEmpty()
             if (loc.isEmpty()) return@mapNotNull null // not on the device (e.g. cloud-only)
             val path = listOf((r[4] as? String).orEmpty(), loc)
                 .filter { it.isNotEmpty() }.joinToString("/").let { if (it.startsWith("/")) it else "/$it" }
             val ext = path.substringAfterLast('.', "").lowercase()
             if (ext !in AUDIO_EXTENSIONS && ext !in VIDEO_EXTENSIONS) return@mapNotNull null
-            Track(
-                pid = (r[0] as? Number)?.toLong() ?: 0L,
-                title = (r[1] as? String)?.trim()?.ifEmpty { null } ?: loc.substringBeforeLast('.'),
-                artist = (r[2] as? String)?.trim()?.ifEmpty { null } ?: UNKNOWN_ARTIST,
-                album = (r[3] as? String)?.trim()?.ifEmpty { null } ?: UNKNOWN_ALBUM,
-                devicePath = path,
-                size = (r[6] as? Number)?.toLong() ?: 0L,
-                trackNumber = (r[7] as? Number)?.toInt() ?: 0,
-                albumArtist = (r[8] as? String)?.trim()?.ifEmpty { null },
-                genre = (r[9] as? String)?.trim()?.ifEmpty { null },
-                composer = (r[10] as? String)?.trim()?.ifEmpty { null },
-                year = (r[11] as? Number)?.toInt() ?: 0,
-                trackCount = (r[12] as? Number)?.toInt() ?: 0,
-                discNumber = (r[13] as? Number)?.toInt() ?: 0,
-                discCount = (r[14] as? Number)?.toInt() ?: 0,
-                kind = kindOf((r[15] as? Number)?.toInt(), ext, ((r[16] as? Number)?.toInt() ?: 0) != 0, r[9] as? String),
+            Raw(
+                Track(
+                    pid = (r[0] as? Number)?.toLong() ?: 0L,
+                    title = (r[1] as? String)?.trim()?.ifEmpty { null } ?: loc.substringBeforeLast('.'),
+                    artist = (r[2] as? String)?.trim()?.ifEmpty { null } ?: UNKNOWN_ARTIST,
+                    album = (r[3] as? String)?.trim()?.ifEmpty { null } ?: UNKNOWN_ALBUM,
+                    devicePath = path,
+                    size = (r[6] as? Number)?.toLong() ?: 0L,
+                    trackNumber = (r[7] as? Number)?.toInt() ?: 0,
+                    albumArtist = (r[8] as? String)?.trim()?.ifEmpty { null },
+                    genre = (r[9] as? String)?.trim()?.ifEmpty { null },
+                    composer = (r[10] as? String)?.trim()?.ifEmpty { null },
+                    year = (r[11] as? Number)?.toInt() ?: 0,
+                    trackCount = (r[12] as? Number)?.toInt() ?: 0,
+                    discNumber = (r[13] as? Number)?.toInt() ?: 0,
+                    discCount = (r[14] as? Number)?.toInt() ?: 0,
+                ),
+                mediaType = (r[15] as? Number)?.toInt(),
+                audible = ((r[16] as? Number)?.toInt() ?: 0) != 0,
+                flags = flagCols.indices.map { i -> ((r[17 + i] as? Number)?.toInt() ?: 0) != 0 },
             )
+        }
+
+        // The stored media_type numbering isn't documented for every iOS version. Whatever value most
+        // ordinary audio tracks share is taken to be "music" (a library is overwhelmingly songs).
+        val musicType = raws.filter {
+            it.mediaType != null && it.track.extension in setOf("mp3", "m4a", "m4p", "aac", "wav", "aif", "aiff") &&
+                !it.track.genre.equals("Podcast", true) && !it.audible
+        }.groupingBy { it.mediaType!! }.eachCount().maxByOrNull { it.value }?.key
+
+        diagnostics = buildString {
+            append("media_type values: ")
+            append(raws.groupingBy { it.mediaType }.eachCount().entries.sortedByDescending { it.value }
+                .joinToString(", ") { "${it.key}×${it.value}" })
+            if (musicType != null) append(" (music = $musicType)")
+            append(if (flagCols.isEmpty()) "; no is_* flags" else "; flags: " + flagCols.joinToString(", "))
+        }
+
+        return raws.map { raw ->
+            val ext = raw.track.extension
+            val byFlag = flagCols.indices.firstOrNull { raw.flags[it] }?.let { FLAG_KINDS[flagCols[it]] }
+            val kind = when {
+                byFlag != null -> byFlag
+                raw.mediaType != null && raw.mediaType == musicType && ext !in VIDEO_EXTENSIONS -> Kind.MUSIC
+                else -> kindOf(raw.mediaType, ext, raw.audible, raw.track.genre)
+            }
+            raw.track.copy(kind = kind)
         }.sortedWith(
             compareBy<Track>({ it.kind.ordinal }, { it.artist.lowercase() }, { it.album.lowercase() }, { it.trackNumber }, { it.title.lowercase() })
         )

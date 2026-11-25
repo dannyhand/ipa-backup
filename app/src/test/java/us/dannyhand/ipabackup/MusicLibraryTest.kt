@@ -127,4 +127,37 @@ class MusicLibraryTest {
         assertEquals("Marimba Remix.m4r", MusicLibrary.saveName(tones[0]))
         assertTrue(tones.all { it.kind == MusicLibrary.Kind.RINGTONE })
     }
+
+    /** Songs stored with a non-MPMediaType number (e.g. 8) must still count as music. */
+    @Test
+    fun majorityTypeIsMusic() {
+        val rows = (1..20).joinToString(", ") { "($it, 8, 'Song $it', 'Band', 'LP', 'iTunes_Control/Music/F00/S$it.mp3', 'Rock')" }
+        val c = db(
+            "CREATE TABLE item (item_pid INTEGER PRIMARY KEY, media_type INTEGER, title TEXT, artist TEXT, album TEXT, location TEXT, genre TEXT)",
+            "INSERT INTO item VALUES $rows",
+            "INSERT INTO item VALUES (100, 4, 'Ep 1', 'Host', 'Show', 'iTunes_Control/Music/F01/P.mp3', 'Podcast')",
+            "INSERT INTO item VALUES (101, 2048, 'Clip', 'Someone', 'Vids', 'iTunes_Control/Music/F01/V.m4v', NULL)",
+        )
+        val lib = MusicLibrary(JdbcSqlDb(c))
+        val tracks = lib.load()
+        assertEquals(20, tracks.count { it.kind == MusicLibrary.Kind.MUSIC })
+        assertEquals(MusicLibrary.Kind.VIDEO, tracks.single { it.title == "Clip" }.kind)
+        assertTrue(lib.diagnostics, lib.diagnostics.contains("music = 8"))
+        assertEquals(MusicLibrary.Kind.PODCAST, tracks.single { it.title == "Ep 1" }.kind) // genre says Podcast
+    }
+
+    /** When per-item flags exist they win over media_type. */
+    @Test
+    fun flagsWin() {
+        val c = db(
+            "CREATE TABLE item (item_pid INTEGER PRIMARY KEY, media_type INTEGER, is_song INTEGER, is_podcast INTEGER, is_audio_book INTEGER, title TEXT, artist TEXT, album TEXT, location TEXT)",
+            "INSERT INTO item VALUES (1, 8, 1, 0, 0, 'Song', 'Band', 'LP', 'iTunes_Control/Music/F00/A.mp3')",
+            "INSERT INTO item VALUES (2, 8, 0, 1, 0, 'Episode', 'Host', 'Show', 'iTunes_Control/Music/F00/B.mp3')",
+            "INSERT INTO item VALUES (3, 8, 0, 0, 1, 'Chapter', 'Author', 'Book', 'iTunes_Control/Music/F00/C.m4a')",
+        )
+        val byTitle = MusicLibrary(JdbcSqlDb(c)).load().associateBy { it.title }
+        assertEquals(MusicLibrary.Kind.MUSIC, byTitle["Song"]!!.kind)
+        assertEquals(MusicLibrary.Kind.PODCAST, byTitle["Episode"]!!.kind)
+        assertEquals(MusicLibrary.Kind.AUDIOBOOK, byTitle["Chapter"]!!.kind)
+    }
 }
