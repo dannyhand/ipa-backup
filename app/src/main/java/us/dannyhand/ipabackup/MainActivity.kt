@@ -44,6 +44,7 @@ import us.dannyhand.ipabackup.pairing.PairRecord
 import us.dannyhand.ipabackup.pairing.PairRecordStore
 import us.dannyhand.ipabackup.springboard.SpringBoardServices
 import us.dannyhand.ipabackup.music.AndroidSqlDb
+import us.dannyhand.ipabackup.music.ITunesDb
 import us.dannyhand.ipabackup.music.ItlpLibrary
 import us.dannyhand.ipabackup.music.MusicLibrary
 import us.dannyhand.ipabackup.util.AudioTagger
@@ -68,6 +69,36 @@ import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
+/**
+ * IPA Backup: backs up an old iPod touch / iPhone / iPad to this phone over a USB OTG cable, with no
+ * computer, no root on the phone and (for most features) no jailbreak on the iOS device.
+ *
+ * How a connection works (each layer has its own file and notes):
+ *   USB Host API (usb/) -> usbmux, TCP-like streams over USB (mux/) -> lockdownd: pairing + TLS session (lockdown/,
+ *   pairing/) -> per-feature services started through lockdownd: installation_proxy (apps), AFC (media files),
+ *   house_arrest (app data), springboardservices (icons), and AFC2 (whole filesystem, jailbreak only).
+ *
+ * What each feature needs (confirmed on an iPod touch 4G, iOS 6.1.6, jailbroken):
+ *   Apps (.ipa)            installation_proxy Archive: iOS 8 or older. Apple removed app extraction in iOS 9
+ *                          (apps are "thinned" per device), so newer devices only work via the AFC2 fallback.
+ *   App data               house_arrest: no jailbreak needed.
+ *   Music / Other Media    AFC media folder: no jailbreak needed. The database format depends on the iOS version,
+ *                          not on jailbreak: iTunesDB (1-2), iTunes Library.itlp (3-4), MediaLibrary.sqlitedb (5+).
+ *   Photos, Voice Memos,   AFC media folder: no jailbreak needed.
+ *   Books
+ *   Contacts, Notes,       System databases under /var/mobile/Library, outside the media folder: need AFC2
+ *   Bookmarks, Calendars,  ("Apple File Conduit 2" from Cydia). Doing these without a jailbreak would need the
+ *   Messages               iTunes-style backup protocol (mobilebackup2), a much bigger job.
+ *   Files                  Whole filesystem with AFC2; just the media folder without it.
+ *
+ * Things worth knowing:
+ *  - App Store apps stay FairPlay-encrypted to the Apple ID that bought them. A backup reinstalls on devices
+ *    signed into that account, or on jailbroken devices with AppSync. This app doesn't remove DRM.
+ *  - iOS 6 and earlier show no "Trust this computer" prompt; the device just has to be unlocked to pair.
+ *  - A device whose battery ran completely flat comes back with its clock at 1970. Anything recorded before the
+ *    clock is set again (voice memos, photos) really carries a 1970 date; that's not a parsing bug.
+ *  - The phone powers the device over OTG. If the version handshake gets no reply, try a powered OTG hub.
+ */
 class MainActivity : Activity() {
 
     private companion object {
@@ -373,6 +404,11 @@ class MainActivity : Activity() {
     }
 
     /** Opens AFC2 if the iPod is jailbroken with AFC2 installed, else null. */
+    /**
+     * AFC2 is the jailbreak-only twin of AFC: same protocol, but rooted at "/" instead of /var/mobile/Media.
+     * It's what makes contacts, notes, bookmarks, calendars, messages, the full file browser and the
+     * app-bundle .ipa fallback possible. On a stock device lockdownd answers InvalidService.
+     */
     private fun tryAfc2(mux: UsbMux, lockdown: DeviceSession): MuxStream? = try {
         val svc = lockdown.startService(AFC2_SERVICE)
         if (svc.ssl) null else mux.connect(svc.port)
@@ -741,6 +777,8 @@ class MainActivity : Activity() {
     }
 
     /** Jailbreak fallback: zip Payload/<App>.app + iTunesMetadata.plist + iTunesArtwork straight from the filesystem. */
+    // The bundle copied this way is the installed, still FairPlay-encrypted binary, exactly like an Archive;
+    // it just doesn't depend on installation_proxy (useful where Archive fails, e.g. iOS 9+).
     private fun backupIpaViaAfc2(afc2: AfcClient, saver: IpaSaver, app: InstallationProxy.App) {
         val path = app.path ?: throw IOException("installation_proxy didn't report the app's path")
         val container = app.container ?: path.substringBeforeLast('/')
@@ -1237,9 +1275,17 @@ class MainActivity : Activity() {
                 null
             }
         }
-        val oldDb = listOf("/iTunes_Control/iTunes/iTunesCDB", "/iTunes_Control/iTunes/iTunesDB").any { runCatching { afc.stat(it) }.isSuccess }
-        log(if (oldDb) "This device uses the iPhone OS 1–2 iTunesDB music format, which isn't supported yet."
-            else "No music library found on the device.")
+        // iPhone OS 1–2: binary iTunesDB (iTunesCDB = zlib-compressed variant).
+        for (path in listOf(ITunesDb.CDB_PATH, ITunesDb.DB_PATH)) {
+            val size = runCatching { afc.stat(path).size }.getOrNull() ?: continue
+            return try {
+                ITunesDb.parse(afc.readHead(path, size.toInt())).also { log("(library: iPhone OS 1–2 ${path.substringAfterLast('/')}, ${it.size} items)") }
+            } catch (e: Exception) {
+                log("Couldn't read ${path.substringAfterLast('/')}: ${e.message}")
+                null
+            }
+        }
+        log("No music library found on the device.")
         return null
     }
 

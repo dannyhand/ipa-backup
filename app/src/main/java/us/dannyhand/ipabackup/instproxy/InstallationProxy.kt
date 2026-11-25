@@ -4,7 +4,15 @@ import us.dannyhand.ipabackup.service.ByteConnection
 import us.dannyhand.ipabackup.service.PlistService
 import java.io.IOException
 
-/** com.apple.mobile.installation_proxy (see libimobiledevice src/installation_proxy.c). */
+/**
+ * com.apple.mobile.installation_proxy (see libimobiledevice src/installation_proxy.c).
+ *
+ * On iOS 6 it answers in binary plists even when asked in XML (that's why plist/BinaryPlist exists).
+ * Browse lists installed apps; Archive packs one into ApplicationArchives/<bundleId>.zip, which already has
+ * the .ipa layout (Payload/<App>.app, iTunesMetadata.plist, iTunesArtwork). Archive works on iOS 8 and older
+ * only: Apple removed app extraction in iOS 9 because apps became thinned per device.
+ * Archives come out at roughly 90-95% of the installed size reported by Browse (StaticDiskUsage).
+ */
 class InstallationProxy(private val conn: ByteConnection) {
 
     companion object { const val SERVICE = "com.apple.mobile.installation_proxy" }
@@ -50,6 +58,9 @@ class InstallationProxy(private val conn: ByteConnection) {
 
     /**
      * Packs an installed app into ApplicationArchives/<bundleId>.zip on the device (iOS ≤ 8).
+     *
+     * ArchiveType "ApplicationOnly" leaves out the app's Documents (app data is backed up separately via
+     * house_arrest). The device needs free space for the archive while it exists; it's removed right after copying.
      *
      * IMPORTANT: without SkipUninstall the device UNINSTALLS the app after archiving.
      * ideviceinstaller sends SkipUninstall=true unless asked to uninstall; so do we, always.

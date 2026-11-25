@@ -9,6 +9,10 @@ import java.util.Locale
  * Voice Memos live in the media folder's /Recordings (no jailbreak needed), with names and labels in
  * /Recordings/Recordings.db. Its schema varies by iOS version, so this looks for a table with a path
  * column plus whatever date / duration / label columns exist, and falls back to the file listing.
+ *
+ * Dates are whatever the device clock said when recording. A device whose battery ran flat restarts at
+ * 1970-01-01, so memos recorded before the clock is set come out as 1970 with a believable time of day
+ * (seen on an iPod touch 4G). The app saves what the device recorded.
  */
 object VoiceMemos {
     const val DIR = "/Recordings"

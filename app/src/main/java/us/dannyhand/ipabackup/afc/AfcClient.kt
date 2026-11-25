@@ -9,7 +9,9 @@ import java.nio.ByteOrder
 class AfcException(val code: Long) : IOException("AFC error $code (${AfcClient.errorName(code)})")
 
 /**
- * Apple File Conduit (com.apple.afc), rooted at /var/mobile/Media.
+ * Apple File Conduit (com.apple.afc), rooted at /var/mobile/Media. No jailbreak needed: this is how
+ * music, photos, voice memos and books are read. The jailbreak-only com.apple.afc2 speaks the same
+ * protocol rooted at "/", and house_arrest switches a connection to AFC rooted at one app's sandbox.
  * See libimobiledevice src/afc.c. Every packet has a 40-byte little-endian header:
  *   "CFA6LPAA" magic, u64 entire_length, u64 this_length (header+params), u64 packet_num, u64 operation
  * followed by params and then payload (entire_length - this_length bytes).

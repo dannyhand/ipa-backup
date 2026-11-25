@@ -7,6 +7,7 @@ import java.io.IOException
 /**
  * com.apple.mobile.house_arrest: after VendContainer, the same connection speaks AFC,
  * rooted at the app's sandbox (Documents/, Library/, tmp/ and, before iOS 8, the .app itself).
+ * No jailbreak needed. Game saves usually live in Documents/ or Library/Preferences/.
  */
 object HouseArrest {
     const val SERVICE = "com.apple.mobile.house_arrest"

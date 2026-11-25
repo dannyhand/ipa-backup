@@ -27,6 +27,10 @@ import java.security.SecureRandom
  * TLS client for lockdownd sessions, in pure Java/Kotlin via BouncyCastle so it can
  * still speak TLS 1.0 with CBC/RSA suites that Android's own TLS stack refuses.
  *
+ * In practice an iPod touch 4G on iOS 6.1.6 negotiated TLS 1.2 with TLS_RSA_WITH_AES_128_CBC_SHA256 (0x003C);
+ * TLS 1.0 and the older suites are kept for devices that can't. A JVM test runs a TLS-1.0-only OpenSSL server
+ * that requires the client certificate, so the legacy path stays verified.
+ *
  * Like libimobiledevice, it presents the host certificate as the client cert and does not
  * verify the device's certificate (the device presents the cert we generated at pairing).
  */

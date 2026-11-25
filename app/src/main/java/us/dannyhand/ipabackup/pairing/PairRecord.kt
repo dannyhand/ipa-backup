@@ -38,6 +38,10 @@ import java.util.UUID
  * (common/userpref.c): a self-signed root CA, plus host and device certificates
  * signed by it. Empty subject/issuer names, serial 0, SHA1withRSA, 10-year validity.
  * All certs and keys are stored as PEM bytes, which is what lockdownd expects in Pair.
+ *
+ * With empty subject and issuer, OpenSSL's "verify" calls the host cert self-signed, but iOS accepts it
+ * (libimobiledevice generates the same shape). Confirmed on iOS 6.1.6. A device that's been reset rejects the
+ * saved record with InvalidHostID; the app then pairs again automatically.
  */
 class PairRecord(
     val hostId: String,

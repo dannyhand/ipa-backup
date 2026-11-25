@@ -44,6 +44,10 @@ class LockdownClient(
     })["Value"]
 
     /** Returns the device's reply (may contain an EscrowBag on success). */
+    /**
+     * iOS 6 and earlier pair silently (no "Trust" prompt) as long as the device is unlocked;
+     * a passcode-locked device answers PasswordProtected. iOS 7+ shows the Trust dialog instead.
+     */
     fun pair(record: PairRecord): Map<String, Any?> = checked(mapOf(
         "Request" to "Pair",
         "PairRecord" to record.toPairRequest(),

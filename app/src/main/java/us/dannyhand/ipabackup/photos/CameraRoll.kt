@@ -2,7 +2,11 @@ package us.dannyhand.ipabackup.photos
 
 import us.dannyhand.ipabackup.afc.AfcClient
 
-/** Photos and videos in the iPod's camera roll (AFC media root: /DCIM/1xxAPPLE/). */
+/**
+ * Photos and videos in the iPod's camera roll (AFC media root: /DCIM/1xxAPPLE/). No jailbreak needed.
+ * Dates come from the files' modification times, i.e. the device clock when taken; a device whose clock
+ * reset to 1970 (flat battery) produces 1970-dated photos until the clock is set again.
+ */
 object CameraRoll {
     val PHOTO_EXT = setOf("jpg", "jpeg", "png", "gif", "heic", "tif", "tiff")
     val VIDEO_EXT = setOf("mov", "mp4", "m4v")

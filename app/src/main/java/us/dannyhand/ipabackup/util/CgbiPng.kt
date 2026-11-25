@@ -10,6 +10,8 @@ import java.util.zip.Inflater
  * Converts Apple's "CgBI" iPhone-optimized PNGs (made by Xcode's pngcrush -iphone) into standard PNGs.
  * CgBI files have an extra CgBI chunk, raw deflate data without the zlib header, BGRA byte order
  * and premultiplied alpha, so ordinary decoders show them as blank or broken.
+ * That's why the PNGs inside a backed-up .ipa look empty in most image viewers on a PC or phone: they're
+ * fine, and the app installs and runs normally. SpringBoard icons and app artwork may use this format too.
  */
 object CgbiPng {
     private val SIGNATURE = byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte(), 13, 10, 26, 10)

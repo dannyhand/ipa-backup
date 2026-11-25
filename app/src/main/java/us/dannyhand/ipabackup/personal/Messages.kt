@@ -8,7 +8,9 @@ import java.util.Date
 /**
  * Reads /var/mobile/Library/SMS/sms.db (needs AFC2) in the iOS 6+ layout: chat, message, handle,
  * chat_message_join, attachment, message_attachment_join. Dates are seconds since 2001
- * (nanoseconds on iOS 11+).
+ * (nanoseconds on iOS 11+). iOS 5 and older used a different single-table layout and aren't supported.
+ * Confirmed working on iOS 6.1.6. Attachment paths are stored as "~/Library/SMS/Attachments/…";
+ * some may be gone from the device, and the export notes how many.
  */
 class MessagesDb(private val db: SqlDb) {
     companion object { const val DB_PATH = "/var/mobile/Library/SMS/sms.db" }

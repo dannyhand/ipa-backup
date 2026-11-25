@@ -21,6 +21,15 @@ fun tableInfoSql(table: String): String {
 
 /**
  * Reads the iPod's music library from /iTunes_Control/iTunes/MediaLibrary.sqlitedb (iOS 5+).
+ *
+ * Where music lives on every iOS version: the audio files sit under /iTunes_Control/Music/F00..F49 with random
+ * 4-letter names; titles, artists and albums live only in the library database. Its format depends on the iOS
+ * version, never on jailbreak (it's all in the AFC media folder):
+ *   iPhone OS 1-2  iTunesDB / iTunesCDB  binary, as on click-wheel iPods        -> ITunesDb
+ *   iPhone OS 3-4  iTunes Library.itlp   folder of SQLite files (libgpod)        -> ItlpLibrary
+ *   iOS 5+         MediaLibrary.sqlitedb one SQLite file (this class)
+ * iTunes also strips most tags from synced files (see util/AudioTagger), so the database is the only
+ * reliable source of song info.
  * The schema moved columns between iOS versions (e.g. title/location in item vs item_extra),
  * so the query is built from whatever tables and columns are actually present.
  */

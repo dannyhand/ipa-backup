@@ -139,8 +139,8 @@ class UsbMux(
     }
 
     private fun dispatch(p: Packet) {
-        // Track the device's sequence number for our outgoing v2 headers.
-        // (Compare with dev->rx_seq handling in usbmuxd's device.c if the device complains.)
+        // Track the device's sequence number for our outgoing v2 headers. Observed on iOS 6: the device's rx_seq
+        // echoes our last tx_seq, and echoing its tx_seq back as our rx_seq keeps it happy.
         if (debug) log("← mux proto=${p.proto} payload=${p.payload.size} tx=${p.txSeq} rx=${p.rxSeq}")
         if (version >= 2) rxSeq = p.txSeq
         when (p.proto) {

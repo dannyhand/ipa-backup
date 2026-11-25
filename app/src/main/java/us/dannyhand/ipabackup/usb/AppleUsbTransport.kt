@@ -13,6 +13,10 @@ import java.io.IOException
 /**
  * Raw bulk-endpoint access to an iOS device's usbmux interface
  * (class 0xFF / subclass 0xFE / protocol 2), via Android's USB Host API. No root needed.
+ *
+ * On an iPod touch 4G (VID:PID 05ac:129e) the mux interface is interface 1 of configuration 4, with bulk
+ * endpoints IN 0x85 / OUT 0x04. The phone powers the device over OTG; if the usbmux version handshake gets
+ * no reply at all, low OTG power is the usual cause (a powered OTG hub fixes it).
  */
 class AppleUsbTransport private constructor(
     private val conn: UsbDeviceConnection,

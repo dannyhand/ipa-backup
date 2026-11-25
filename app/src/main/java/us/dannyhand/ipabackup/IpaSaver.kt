@@ -14,6 +14,9 @@ import java.io.OutputStream
 /**
  * Writes backups to Download/IPA Backup/ (MediaStore on Android 10+, app storage before that).
  * Re-saving a file with the same name replaces it.
+ *
+ * Android 10+ only lets an app see Downloads entries it created itself, so "already saved" checks only know
+ * about files from this install. Reinstalling with a different signing key (e.g. debug -> release) loses that.
  */
 class IpaSaver(private val context: Context) {
 

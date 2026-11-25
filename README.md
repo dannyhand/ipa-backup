@@ -70,7 +70,7 @@ Android's USB Host API:
 | `housearrest/` | house_arrest: access an app's sandbox for data backups |
 | `plist/` | XML and binary property lists |
 | `springboard/` | springboardservices: app icons |
-| `music/` | Reads `MediaLibrary.sqlitedb` (iOS 5+) or `iTunes Library.itlp` (iPhone OS 3 / iOS 4) |
+| `music/` | Music library readers: `iTunesDB`/`iTunesCDB` (iPhone OS 1–2), `iTunes Library.itlp` (3–4), `MediaLibrary.sqlitedb` (5+) |
 | `util/AudioTagger` | Writes MP4 (ilst) and ID3v2.3 tags; keeps audio data byte-identical |
 | `photos/`, `util/ExifThumb` | Camera roll listing; thumbnails from the EXIF preview in each photo's first few KB |
 | `media/` | Voice Memos (`Recordings.db`) and iBooks (`Books.plist`) readers |
@@ -79,6 +79,17 @@ Android's USB Host API:
 
 The protocol details come from the excellent [libimobiledevice](https://libimobiledevice.org) project's
 documentation and source. No code was copied.
+
+## Device support
+
+| Feature | Needs |
+|---|---|
+| Apps (.ipa) | iOS 8 or older (Apple removed app extraction in iOS 9); jailbroken devices with AFC2 on any version |
+| App data, Music, Other Media, Photos, Voice Memos, Books | Any iOS version, no jailbreak |
+| Contacts, Notes, Bookmarks, Calendars, Messages | Jailbreak with AFC2 ("Apple File Conduit 2" from Cydia) |
+| Files | Media folder without a jailbreak; whole filesystem with AFC2 |
+
+Tested on an iPod touch 4th gen, iOS 6.1.6. The source has notes at each layer on what was learned along the way.
 
 ## Building
 

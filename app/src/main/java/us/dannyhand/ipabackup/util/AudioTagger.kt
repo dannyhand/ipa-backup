@@ -9,7 +9,10 @@ import java.nio.ByteBuffer
 
 /**
  * Writes song info into audio files copied off an iPod. iTunes keeps title/artist/album only in the
- * iPod's database, so synced files often arrive with those tags missing.
+ * iPod's database, so synced files often arrive with those tags missing. Seen on a real iOS 6 sync: an .m4a's
+ * ilst held only the encoder (©too), two sound-check "----" items and the lyrics (©lyr), no title/artist/album.
+ * On that file the new tags fit in iTunes' 4 KB free padding, so the file size didn't change; with offsets
+ * shifted instead, the decoded audio was still bit-identical (checked with ffmpeg + mutagen).
  *
  * - .m4a/.m4b/.aac (MP4): sets iTunes-style atoms in moov/udta/meta/ilst, keeping other items
  *   (lyrics, sound check…). Uses the `free` padding iTunes leaves next to ilst when it fits;
