@@ -51,6 +51,11 @@ import us.dannyhand.ipabackup.photos.CameraRoll
 import us.dannyhand.ipabackup.media.BooksLibrary
 import us.dannyhand.ipabackup.media.VoiceMemos
 import us.dannyhand.ipabackup.personal.AddressBook
+import us.dannyhand.ipabackup.personal.CalendarDb
+import us.dannyhand.ipabackup.personal.ContactNames
+import us.dannyhand.ipabackup.personal.Ics
+import us.dannyhand.ipabackup.personal.MessagesDb
+import us.dannyhand.ipabackup.personal.MessagesHtml
 import us.dannyhand.ipabackup.personal.BookmarksHtml
 import us.dannyhand.ipabackup.personal.NotesDb
 import us.dannyhand.ipabackup.personal.NotesExport
@@ -78,7 +83,7 @@ class MainActivity : Activity() {
         const val MENU_CLEAR_LOG = 2
         const val THUMB_PX = 200
         /** Formats we can write song info into (DRM .m4p is left untouched). */
-        val TAGGABLE = setOf("m4a", "m4b", "aac", "mp3")
+        val TAGGABLE = setOf("m4a", "m4b", "m4r", "aac", "mp3")
     }
 
     private lateinit var logView: TextView
@@ -122,42 +127,65 @@ class MainActivity : Activity() {
             isAllCaps = false
             setOnClickListener { onClick() }
         }
-        val buttons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            val lp = { LinearLayout.LayoutParams(0, -2, 1f) }
-            addView(button("Apps") { withDevice(::probe) }, lp())
-            addView(button("Music") { withDevice(::browseMusic) }, lp())
-            addView(button("Photos") { withDevice(::browsePhotos) }, lp())
-            addView(button("Files") { withDevice(::browseFiles) }, lp())
+        // Feature buttons, at most three per row.
+        val actions = listOf<Pair<String, (UsbDevice) -> Unit>>(
+            "Apps" to ::probe,
+            "Music" to { d -> browseMusic(d, otherMedia = false) },
+            "Photos" to ::browsePhotos,
+            "Other Media" to { d -> browseMusic(d, otherMedia = true) },
+            "Voice Memos" to ::browseVoiceMemos,
+            "Books" to ::browseBooks,
+            "Messages" to ::exportMessages,
+            "Contacts & Notes" to ::exportPersonalData,
+            "Files" to ::browseFiles,
+        )
+        val buttonGrid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        actions.chunked(3).forEach { row ->
+            buttonGrid.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                row.forEach { (label, action) ->
+                    addView(button(label) { withDevice(action) }, LinearLayout.LayoutParams(0, -2, 1f))
+                }
+                // Keep button widths equal on a short last row.
+                repeat(3 - row.size) { addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 0, 1f)) }
+            })
         }
         stopButton = button("Stop…") { confirmStop() }.apply {
             visibility = View.GONE
             setTextColor(0xFFC62828.toInt())
         }
-        val buttons2 = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            val lp = { LinearLayout.LayoutParams(0, -2, 1f) }
-            addView(button("Voice Memos") { withDevice(::browseVoiceMemos) }, lp())
-            addView(button("Books") { withDevice(::browseBooks) }, lp())
-            addView(button("Contacts & Notes") { withDevice(::exportPersonalData) }, lp())
+
+        // Our own toolbar (theme has no action bar), so the status-bar inset is applied exactly once.
+        val barContext = android.view.ContextThemeWrapper(this, android.R.style.ThemeOverlay_Material_Dark_ActionBar)
+        val toolbar = android.widget.Toolbar(barContext).apply {
+            title = "IPA Backup"
+            setBackgroundColor(0xFF212121.toInt())
+            popupTheme = android.R.style.ThemeOverlay_Material_Light
+            val tv = TypedValue()
+            if (theme.resolveAttribute(android.R.attr.actionBarSize, tv, true))
+                minimumHeight = TypedValue.complexToDimensionPixelSize(tv.data, resources.displayMetrics)
         }
+        setActionBar(toolbar)
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(buttons)
-            addView(buttons2)
+            addView(toolbar, LinearLayout.LayoutParams(-1, -2))
+            addView(buttonGrid)
             addView(stopButton)
             addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
-        // targetSdk 35 forces edge-to-edge; pad for the action bar + system bars.
+        // targetSdk 35 draws edge-to-edge: the toolbar extends under the status bar (its padding),
+        // and the bottom/side insets pad the rest.
         root.setOnApplyWindowInsetsListener { v, insets ->
-            if (Build.VERSION.SDK_INT >= 30) {
+            val (l, t, r, btm) = if (Build.VERSION.SDK_INT >= 30) {
                 val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-                v.setPadding(bars.left, bars.top + actionBarHeight(), bars.right, bars.bottom)
+                listOf(bars.left, bars.top, bars.right, bars.bottom)
             } else {
                 @Suppress("DEPRECATION")
-                v.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop,
-                    insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
+                listOf(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
             }
+            v.setPadding(l, 0, r, btm)
+            toolbar.setPadding(0, t, 0, 0)
             insets
         }
         setContentView(root)
@@ -1128,18 +1156,38 @@ class MainActivity : Activity() {
 
     /** Track pids checked in the music list; kept while the browser is open. */
     private val musicSelected = HashSet<Long>()
+    @Volatile private var musicOther = false
     private var musicQuery = ""
 
-    private fun browseMusic(device: UsbDevice) {
-        log("\nLoading the music library…")
+    /** Music, or (otherMedia) podcasts, audiobooks, iTunes U, synced videos and ringtones. */
+    private fun browseMusic(device: UsbDevice, otherMedia: Boolean) {
+        log(if (otherMedia) "\nLoading podcasts, audiobooks, videos and ringtones…" else "\nLoading the music library…")
         val cmds = LinkedBlockingQueue<MusicCmd>()
         musicSelected.clear()
         musicQuery = ""
+        musicOther = otherMedia
         runOnDevice(device, after = { setStopButtonVisible(false); stopMode = StopMode.NONE }) { mux, lockdown ->
             withService(mux, lockdown, AfcClient.SERVICE) { stream ->
                 val afc = AfcClient(stream)
-                val tracks = loadMusicLibrary(afc) ?: return@withService
-                log("${tracks.size} songs (${humanSize(tracks.sumOf { it.size })}) in the library.")
+                val library = loadMusicLibrary(afc) ?: if (otherMedia) emptyList() else return@withService
+                val tracks = if (!otherMedia) library.filter { it.kind == MusicLibrary.Kind.MUSIC } else {
+                    val tones = runCatching {
+                        val files = afc.readDir(MusicLibrary.RINGTONES_DIR).mapNotNull { n ->
+                            runCatching { afc.stat("${MusicLibrary.RINGTONES_DIR}/$n") }.getOrNull()?.takeIf { !it.isDir }?.let { n to it.size }
+                        }
+                        val plist = runCatching { Plist.parse(afc.readHead(MusicLibrary.RINGTONES_PLIST, 4 shl 20)) }.getOrNull()
+                        MusicLibrary.ringtones(plist, files)
+                    }.getOrDefault(emptyList())
+                    library.filter { it.kind != MusicLibrary.Kind.MUSIC } + tones
+                }
+                if (otherMedia) {
+                    val counts = tracks.groupingBy { it.kind }.eachCount()
+                    log(if (counts.isEmpty()) "No podcasts, audiobooks, videos or ringtones on the iPod."
+                        else counts.entries.joinToString(", ") { (k, n) -> "$n ${k.folder.lowercase()}" } +
+                            " (${humanSize(tracks.sumOf { it.size })}).")
+                } else {
+                    log("${tracks.size} songs (${humanSize(tracks.sumOf { it.size })}) in the library.")
+                }
                 if (tracks.isEmpty()) return@withService
                 cmds.offer(MusicCmd.Show)
                 while (true) {
@@ -1206,7 +1254,7 @@ class MainActivity : Activity() {
             setPadding(pad / 4, 0, pad / 4, pad / 4)
         }
         // Fast-scroll bubble shows the artist's first letter (the list is sorted by artist).
-        fun initial(t: MusicLibrary.Track) = t.artist.firstOrNull()?.uppercaseChar()?.let { if (it.isLetter()) "$it" else "#" } ?: "#"
+        fun initial(t: MusicLibrary.Track) = if (musicOther) t.kind.label.take(1) else t.artist.firstOrNull()?.uppercaseChar()?.let { if (it.isLetter()) "$it" else "#" } ?: "#"
         var sections: Array<String> = emptyArray()
         var sectionStarts: IntArray = IntArray(0)
         val adapter = object : BaseAdapter(), android.widget.SectionIndexer {
@@ -1235,7 +1283,9 @@ class MainActivity : Activity() {
                 val t = visible[position]
                 val box = if (t.pid in musicSelected) "☑" else "☐"
                 val drm = if (t.isDrm) "  🔒" else ""
-                tv.text = "$box  ${t.title}$drm\n      ${t.artist} — ${t.album}  (${humanSize(t.size)})"
+                val kind = if (musicOther) "${t.kind.label} · " else ""
+                val by = if (t.kind == MusicLibrary.Kind.RINGTONE) "" else "${t.artist} — ${t.album}  "
+                tv.text = "$box  ${t.title}$drm\n      $kind$by(${humanSize(t.size)})"
                 tv.setBackgroundColor(if (t.pid in musicSelected) 0x331E88E5 else 0)
                 return tv
             }
@@ -1253,7 +1303,7 @@ class MainActivity : Activity() {
             addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.55).toInt()))
         }
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Music (${tracks.size} songs)")
+            .setTitle(if (musicOther) "Podcasts, Audiobooks, Video & Ringtones (${tracks.size})" else "Music (${tracks.size} songs)")
             .setView(container)
             .setPositiveButton("Copy", null)
             .setNeutralButton("Select all", null)
@@ -1320,8 +1370,13 @@ class MainActivity : Activity() {
             android.os.StatFs(android.os.Environment.getExternalStorageDirectory().path).availableBytes
         }.getOrDefault(-1L)
         val msg = buildString {
-            append("Copy ${chosen.size} song${if (chosen.size == 1) "" else "s"} (${humanSize(total)}) as \"Artist - Title\" to ")
-            append("Download/${IpaSaver.FOLDER}/$MUSIC_SUBFOLDER/?")
+            if (musicOther) {
+                append("Copy ${chosen.size} item${if (chosen.size == 1) "" else "s"} (${humanSize(total)}) to ")
+                append(chosen.map { it.kind.folder }.distinct().joinToString(", ") { "Download/${IpaSaver.FOLDER}/$it/" } + "?")
+            } else {
+                append("Copy ${chosen.size} song${if (chosen.size == 1) "" else "s"} (${humanSize(total)}) as \"Artist - Title\" to ")
+                append("Download/${IpaSaver.FOLDER}/$MUSIC_SUBFOLDER/?")
+            }
             if (free >= 0) {
                 append("\n\nFree space on this phone: ${humanSize(free)}")
                 if (total > free) append("\n⚠️ Not enough space for all of them.")
@@ -1366,15 +1421,16 @@ class MainActivity : Activity() {
         keepScreenOn(true)
         setStopButtonVisible(true)
         afc.cancelCheck = ::checkStopNow
-        log("\nCopying ${tracks.size} songs to Download/${IpaSaver.FOLDER}/$MUSIC_SUBFOLDER/")
+        log("\nCopying ${tracks.size} items to Download/${IpaSaver.FOLDER}/")
         try {
             for ((i, t) in tracks.withIndex()) {
                 if (stopMode != StopMode.NONE) break
-                val name = MusicLibrary.uniqueName(MusicLibrary.fileName(t), used)
+                val name = MusicLibrary.uniqueName(MusicLibrary.saveName(t), used)
+                val folder = t.kind.folder
                 log("[${i + 1}/${tracks.size}] $name")
-                val target = saver.create(name, MUSIC_SUBFOLDER)
+                val target = saver.create(name, folder)
                 try {
-                    if (writeTags && t.extension in TAGGABLE) {
+                    if (writeTags && t.extension in TAGGABLE && t.kind != MusicLibrary.Kind.VIDEO) {
                         // Tagging needs random access, so stage the file in app cache first.
                         val tmp = java.io.File(cacheDir, "song.tmp")
                         try {
@@ -1385,7 +1441,7 @@ class MainActivity : Activity() {
                                 // Unusual file layout: save it untouched rather than failing.
                                 log("  couldn't write tags (${e.message}); saved as-is")
                                 target.discard()
-                                val plain = saver.create(name, MUSIC_SUBFOLDER)
+                                val plain = saver.create(name, folder)
                                 tmp.inputStream().use { it.copyTo(plain.stream) }
                                 plain.commit()
                                 ok++
@@ -2291,6 +2347,7 @@ class MainActivity : Activity() {
         val contacts = box("Contacts → .vcf (imports into Google Contacts)", "export_contacts")
         val notes = box("Notes → .html, plus a .zip of text files", "export_notes")
         val bookmarks = box("Safari bookmarks & Reading List → .html (imports into any browser)", "export_bookmarks")
+        val calendars = box("Calendars → .ics, one file per calendar (imports into Google Calendar)", "export_calendars")
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad / 2, pad, 0)
@@ -2302,21 +2359,22 @@ class MainActivity : Activity() {
             addView(contacts)
             addView(notes)
             addView(bookmarks)
+            addView(calendars)
         }
         AlertDialog.Builder(this)
-            .setTitle("Contacts, Notes & Bookmarks")
+            .setTitle("Contacts, Notes, Bookmarks & Calendars")
             .setView(body)
             .setPositiveButton("Export") { _, _ ->
                 prefs.edit().putBoolean("export_contacts", contacts.isChecked).putBoolean("export_notes", notes.isChecked)
-                    .putBoolean("export_bookmarks", bookmarks.isChecked).apply()
-                if (contacts.isChecked || notes.isChecked || bookmarks.isChecked)
-                    runPersonalExport(device, contacts.isChecked, notes.isChecked, bookmarks.isChecked)
+                    .putBoolean("export_bookmarks", bookmarks.isChecked).putBoolean("export_calendars", calendars.isChecked).apply()
+                if (contacts.isChecked || notes.isChecked || bookmarks.isChecked || calendars.isChecked)
+                    runPersonalExport(device, contacts.isChecked, notes.isChecked, bookmarks.isChecked, calendars.isChecked)
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun runPersonalExport(device: UsbDevice, doContacts: Boolean, doNotes: Boolean, doBookmarks: Boolean) {
+    private fun runPersonalExport(device: UsbDevice, doContacts: Boolean, doNotes: Boolean, doBookmarks: Boolean, doCalendars: Boolean) {
         log("\nExporting personal data…")
         runOnDevice(device) { mux, lockdown ->
             val stream = tryAfc2(mux, lockdown) ?: run {
@@ -2388,6 +2446,168 @@ class MainActivity : Activity() {
                 } catch (e: Exception) {
                     log("Safari bookmarks FAILED: ${e.message}")
                 }
+
+                if (doCalendars) try {
+                    val db = copySqlite(afc, CalendarDb.DB_PATH, "calendar") ?: throw IOException("Calendar.sqlitedb not found")
+                    val cals = withSqlite(db) { CalendarDb(it).load() }
+                    if (cals.isEmpty()) log("Calendars: no events found.")
+                    val used = HashSet<String>()
+                    for (cal in cals) {
+                        val name = MusicLibrary.uniqueName(IpaSaver.clean("Calendar - ${cal.title} ($owner) $stamp").take(150) + ".ics", used)
+                        saveText(name, Ics.write(cal, owner))
+                        log("Calendar \"${cal.title}\": ${cal.events.size} events saved")
+                    }
+                } catch (e: Exception) {
+                    log("Calendars FAILED: ${e.message}")
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- messages
+
+    private fun exportMessages(device: UsbDevice) {
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val attach = CheckBox(this).apply {
+            text = "Include photos & attachments (adds a .zip with one page per conversation)"
+            isChecked = prefs.getBoolean("msg_attachments", true)
+        }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(TextView(this@MainActivity).apply {
+                text = "Saves your iMessage/SMS conversations as a readable web page in " +
+                    "Download/${IpaSaver.FOLDER}/$PERSONAL_SUBFOLDER/, with names from your contacts. " +
+                    "Needs a jailbroken iPod with AFC2."
+                textSize = 13f
+                alpha = 0.8f
+            })
+            addView(attach)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Messages")
+            .setView(body)
+            .setPositiveButton("Export") { _, _ ->
+                prefs.edit().putBoolean("msg_attachments", attach.isChecked).apply()
+                runMessagesExport(device, attach.isChecked)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun runMessagesExport(device: UsbDevice, includeAttachments: Boolean) {
+        log("\nExporting messages…")
+        runOnDevice(device, after = { setStopButtonVisible(false); stopMode = StopMode.NONE }) { mux, lockdown ->
+            val stream = tryAfc2(mux, lockdown) ?: run {
+                log("Messages live in a system folder that needs a jailbroken device with AFC2 (\"Apple File Conduit 2\" from Cydia).")
+                return@runOnDevice
+            }
+            stream.use {
+                val afc = AfcClient(stream)
+                val saver = IpaSaver(this)
+                val owner = lockdown.deviceName
+                val stamp = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+
+                val db = copySqlite(afc, MessagesDb.DB_PATH, "sms") ?: run { log("No messages database on the iPod."); return@runOnDevice }
+                val chats = try {
+                    withSqlite(db) { MessagesDb(it).load() }
+                } catch (e: Exception) {
+                    log("Couldn't read messages: ${e.message}")
+                    return@runOnDevice
+                }
+                val contacts = runCatching {
+                    copySqlite(afc, AddressBook.DB_PATH, "contacts")?.let { f -> withSqlite(f) { AddressBook(it).load() } }
+                }.getOrNull().orEmpty()
+                val names = ContactNames(contacts)
+                val attachments = chats.flatMap { c -> c.messages.flatMap { it.attachments } }
+                log("${chats.size} conversations, ${chats.sumOf { it.messages.size }} messages, ${attachments.size} attachments " +
+                    "(${humanSize(attachments.sumOf { it.size })}).")
+                if (chats.isEmpty()) return@runOnDevice
+
+                val dayFmt = java.text.DateFormat.getDateInstance(java.text.DateFormat.FULL)
+                val shortDay = java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM)
+                val timeFmt = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT)
+
+                // 1) One self-contained page with every conversation (attachments listed by name).
+                val single = buildString {
+                    append(MessagesHtml.index(owner, chats, names, { "#chat-${it.id}" }, shortDay))
+                    for (c in chats) {
+                        append("<h2 id=\"chat-${c.id}\">").append(NotesExport.escape(MessagesHtml.title(c, names))).append("</h2>\n")
+                        append(MessagesHtml.conversation(c, names, dayFmt, timeFmt) { null })
+                    }
+                }
+                val t = saver.create("Messages ($owner) $stamp.html", PERSONAL_SUBFOLDER)
+                try {
+                    t.stream.write(MessagesHtml.page("Messages from $owner", single).toByteArray(Charsets.UTF_8))
+                    t.commit()
+                    log("Saved ${t.location}")
+                } catch (e: Exception) {
+                    t.discard()
+                    log("Couldn't save messages: ${e.message}")
+                    return@runOnDevice
+                }
+
+                // 2) Zip: index + one page per conversation + the attachment files, linked and shown inline.
+                if (!includeAttachments) return@runOnDevice
+                stopMode = StopMode.NONE
+                keepScreenOn(true)
+                setStopButtonVisible(true)
+                afc.cancelCheck = ::checkStopNow
+                val z = saver.create("Messages ($owner) $stamp.zip", PERSONAL_SUBFOLDER)
+                try {
+                    val zos = java.util.zip.ZipOutputStream(z.stream)
+                    val tmp = java.io.File(cacheDir, "attachment.tmp")
+                    val hrefs = HashMap<Long, String>()
+                    var copied = 0
+                    var missing = 0
+                    for ((i, a) in attachments.withIndex()) {
+                        if (stopMode == StopMode.AFTER_CURRENT) break
+                        val path = a.devicePath ?: run { missing++; null } ?: continue
+                        try {
+                            java.io.FileOutputStream(tmp).use { afc.copyFile(path, it) }
+                            val entry = "attachments/${a.id}-${IpaSaver.clean(a.name)}"
+                            zos.putNextEntry(java.util.zip.ZipEntry("Messages/$entry"))
+                            tmp.inputStream().use { it.copyTo(zos, 1 shl 16) }
+                            zos.closeEntry()
+                            hrefs[a.id] = entry
+                            copied++
+                        } catch (e: StopNowException) {
+                            throw e
+                        } catch (e: Exception) {
+                            missing++ // deleted on the device, or never downloaded
+                        }
+                        if ((i + 1) % 25 == 0) log("  attachments: ${i + 1}/${attachments.size}")
+                    }
+                    tmp.delete()
+                    val pages = HashMap<Long, String>()
+                    val used = HashSet<String>()
+                    chats.forEachIndexed { i, c ->
+                        pages[c.id] = MusicLibrary.uniqueName("%03d %s.html".format(i + 1, IpaSaver.clean(MessagesHtml.title(c, names)).take(60)), used)
+                    }
+                    fun put(name: String, html: String) {
+                        zos.putNextEntry(java.util.zip.ZipEntry("Messages/$name"))
+                        zos.write(html.toByteArray(Charsets.UTF_8))
+                        zos.closeEntry()
+                    }
+                    put("index.html", MessagesHtml.page("Messages from $owner", MessagesHtml.index(owner, chats, names, { pages[it.id]!! }, shortDay)))
+                    for (c in chats) {
+                        val title = MessagesHtml.title(c, names)
+                        val content = "<p><a href=\"index.html\">← All conversations</a></p><h1>${NotesExport.escape(title)}</h1>\n" +
+                            MessagesHtml.conversation(c, names, dayFmt, timeFmt) { hrefs[it.id] }
+                        put(pages[c.id]!!, MessagesHtml.page(title, content))
+                    }
+                    zos.finish()
+                    z.commit()
+                    log("Saved ${z.location} ($copied attachments" + (if (missing > 0) ", $missing no longer on the iPod" else "") + ")")
+                } catch (e: StopNowException) {
+                    z.discard()
+                    log("Stopped; the .zip was discarded (the .html with all messages was already saved).")
+                } catch (e: Exception) {
+                    z.discard()
+                    log("Couldn't build the messages .zip: ${e.message}")
+                } finally {
+                    afc.cancelCheck = {}
+                }
             }
         }
     }
@@ -2419,13 +2639,6 @@ class MainActivity : Activity() {
     private fun keepScreenOn(on: Boolean) = runOnUiThread {
         if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-    }
-
-    private fun actionBarHeight(): Int {
-        if (actionBar?.isShowing != true) return 0
-        val tv = TypedValue()
-        return if (theme.resolveAttribute(android.R.attr.actionBarSize, tv, true))
-            TypedValue.complexToDimensionPixelSize(tv.data, resources.displayMetrics) else 0
     }
 
     private fun log(msg: String) = runOnUiThread {

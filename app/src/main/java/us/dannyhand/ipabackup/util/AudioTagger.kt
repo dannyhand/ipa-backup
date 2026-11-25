@@ -37,7 +37,7 @@ object AudioTagger {
 
     fun writeTagged(src: File, extension: String, tags: Tags, out: OutputStream): Result =
         when (extension.lowercase()) {
-            "m4a", "m4b", "aac", "mp4" -> Mp4.write(src, tags, out)
+            "m4a", "m4b", "m4r", "aac", "mp4" -> Mp4.write(src, tags, out)
             "mp3" -> Id3.write(src, tags, out)
             else -> { src.inputStream().use { it.copyTo(out) }; Result.UNCHANGED }
         }

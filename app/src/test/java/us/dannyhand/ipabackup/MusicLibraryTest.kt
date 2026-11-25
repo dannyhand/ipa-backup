@@ -46,7 +46,10 @@ class MusicLibraryTest {
             "INSERT INTO item VALUES (10, 1, 1, NULL, 1, 1, 2), (11, 1, 1, NULL, 1, 1, 1), (12, 1, 2, 1, 2, 2, 1), (13, 1, NULL, NULL, NULL, 2, 0), (14, 1, 1, NULL, 1, 1, 3), (15, 1024, 1, NULL, 1, 1, 0)",
             "INSERT INTO item_extra VALUES (10, 'Digital Love', 'ABCD.mp3', 5000000), (11, 'One More Time', 'EFGH.m4a', 6000000), (12, 'Track: \"Mix\"', 'IJKL.mp3', 100), (13, NULL, 'MNOP.m4p', 200), (14, 'Cloud Song', '', 0), (15, 'A Video', 'QRST.m4v', 999)",
         )
-        val tracks = MusicLibrary(JdbcSqlDb(c)).load()
+        val all = MusicLibrary(JdbcSqlDb(c)).load()
+        // media_type 1024 = video podcast: kept for Other Media, not shown as music.
+        assertEquals(MusicLibrary.Kind.PODCAST, all.single { it.title == "A Video" }.kind)
+        val tracks = all.filter { it.kind == MusicLibrary.Kind.MUSIC }
         assertEquals(listOf("One More Time", "Digital Love", "MNOP", "Track: \"Mix\""), tracks.map { it.title })
 
         val first = tracks[0]
@@ -86,5 +89,42 @@ class MusicLibraryTest {
         assertEquals("A - B.mp3", MusicLibrary.uniqueName("A - B.mp3", used))
         assertEquals("A - B (2).mp3", MusicLibrary.uniqueName("A - B.mp3", used))
         assertEquals("a - b (3).mp3", MusicLibrary.uniqueName("a - b.mp3", used)) // storage is case-insensitive
+    }
+
+    @Test
+    fun mediaKindsAndNames() {
+        val c = db(
+            "CREATE TABLE item (item_pid INTEGER PRIMARY KEY, media_type INTEGER, title TEXT, artist TEXT, album TEXT, location TEXT, genre TEXT)",
+            "INSERT INTO item VALUES (1, 1, 'Song', 'Band', 'LP', 'iTunes_Control/Music/F00/A.mp3', 'Rock')",
+            "INSERT INTO item VALUES (2, 2, 'Episode 12', 'Host', 'My Show', 'iTunes_Control/Music/F00/B.mp3', 'Podcast')",
+            "INSERT INTO item VALUES (3, 4, 'Chapter 1', 'Author', 'Big Book', 'iTunes_Control/Music/F00/C.m4b', NULL)",
+            "INSERT INTO item VALUES (4, 512, 'Pilot', 'The Show', 'Season 1', 'iTunes_Control/Music/F00/D.m4v', NULL)",
+            "INSERT INTO item VALUES (5, 1024, 'Video Ep', 'Host', 'Vid Show', 'iTunes_Control/Music/F00/E.m4v', NULL)",
+            "INSERT INTO item VALUES (6, 0, 'Home Clip', NULL, NULL, 'iTunes_Control/Music/F00/F.mov', NULL)",
+            "INSERT INTO item VALUES (7, 8, 'Lecture 3', 'Prof', 'CS 101', 'iTunes_Control/Music/F00/G.m4a', NULL)",
+        )
+        val byTitle = MusicLibrary(JdbcSqlDb(c)).load().associateBy { it.title }
+        assertEquals(MusicLibrary.Kind.MUSIC, byTitle["Song"]!!.kind)
+        assertEquals(MusicLibrary.Kind.PODCAST, byTitle["Episode 12"]!!.kind)
+        assertEquals(MusicLibrary.Kind.AUDIOBOOK, byTitle["Chapter 1"]!!.kind)
+        assertEquals(MusicLibrary.Kind.VIDEO, byTitle["Pilot"]!!.kind)
+        assertEquals(MusicLibrary.Kind.PODCAST, byTitle["Video Ep"]!!.kind)
+        assertEquals(MusicLibrary.Kind.VIDEO, byTitle["Home Clip"]!!.kind)
+        assertEquals(MusicLibrary.Kind.ITUNES_U, byTitle["Lecture 3"]!!.kind)
+        assertEquals("Band - Song.mp3", MusicLibrary.saveName(byTitle["Song"]!!))
+        assertEquals("My Show - Episode 12.mp3", MusicLibrary.saveName(byTitle["Episode 12"]!!))
+        assertEquals("Author - Chapter 1.m4b", MusicLibrary.saveName(byTitle["Chapter 1"]!!))
+        assertEquals("The Show - Pilot.m4v", MusicLibrary.saveName(byTitle["Pilot"]!!))
+        assertEquals("Home Clip.mov", MusicLibrary.saveName(byTitle["Home Clip"]!!))
+    }
+
+    @Test
+    fun ringtonesFromPlist() {
+        val plist = mapOf("Ringtones" to mapOf("ABCD.m4r" to mapOf("Name" to "Marimba Remix")))
+        val tones = MusicLibrary.ringtones(plist, listOf("ABCD.m4r" to 300_000L, "WXYZ.m4r" to 200_000L, "notes.txt" to 5L))
+        assertEquals(listOf("Marimba Remix", "WXYZ"), tones.map { it.title })
+        assertEquals("/iTunes_Control/Ringtones/ABCD.m4r", tones[0].devicePath)
+        assertEquals("Marimba Remix.m4r", MusicLibrary.saveName(tones[0]))
+        assertTrue(tones.all { it.kind == MusicLibrary.Kind.RINGTONE })
     }
 }

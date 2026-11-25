@@ -32,6 +32,7 @@ class IpaSaver(private val context: Context) {
             "png" -> "image/png"
             "gif" -> "image/gif"
             "vcf" -> "text/x-vcard"
+            "ics" -> "text/calendar"
             "html", "htm" -> "text/html"
             "txt" -> "text/plain"
             "epub" -> "application/epub+zip"
