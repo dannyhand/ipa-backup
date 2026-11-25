@@ -122,6 +122,23 @@ class AfcClient(private val conn: ByteConnection) {
         receive()
     }
 
+    /** Reads up to [max] bytes from the start of a file (e.g. a JPEG's EXIF header). */
+    fun readHead(path: String, max: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val handle = open(path)
+        try {
+            while (out.size() < max) {
+                cancelCheck()
+                val chunk = read(handle, minOf(READ_CHUNK, max - out.size()))
+                if (chunk.isEmpty()) break
+                out.write(chunk)
+            }
+        } finally {
+            runCatching { close(handle) }
+        }
+        return out.toByteArray()
+    }
+
     /** Copies a device file to [out]. [progress] gets (bytesCopied, totalBytes or -1). Returns bytes copied. */
     fun copyFile(path: String, out: OutputStream, progress: (Long, Long) -> Unit = { _, _ -> }): Long {
         cancelCheck()

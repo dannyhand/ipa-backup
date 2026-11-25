@@ -30,6 +30,10 @@ class IpaSaver(private val context: Context) {
             "wav" -> "audio/wav"
             "aif", "aiff" -> "audio/aiff"
             "png" -> "image/png"
+            "gif" -> "image/gif"
+            "heic" -> "image/heic"
+            "mov" -> "video/quicktime"
+            "mp4", "m4v" -> "video/mp4"
             "jpg", "jpeg" -> "image/jpeg"
             else -> "application/octet-stream"
         }
@@ -78,7 +82,8 @@ class IpaSaver(private val context: Context) {
         return uris
     }
 
-    fun create(fileName: String, sub: String? = null): Target {
+    /** [dateTakenMs] sets the gallery date for photos/videos (Android 10+). */
+    fun create(fileName: String, sub: String? = null, dateTakenMs: Long? = null): Target {
         if (Build.VERSION.SDK_INT >= 29) {
             val resolver = context.contentResolver
             findUris(fileName, sub).forEach { runCatching { resolver.delete(it, null, null) } } // replace old copy
@@ -87,6 +92,7 @@ class IpaSaver(private val context: Context) {
                 put(MediaStore.Downloads.MIME_TYPE, mimeType(fileName))
                 put(MediaStore.Downloads.RELATIVE_PATH, relPath(sub))
                 put(MediaStore.Downloads.IS_PENDING, 1)
+                if (dateTakenMs != null && dateTakenMs > 0) put(MediaStore.MediaColumns.DATE_TAKEN, dateTakenMs)
             }
             val uri: Uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 ?: throw java.io.IOException("Couldn't create $fileName in Downloads")
