@@ -26,6 +26,8 @@ class MuxStream internal constructor(
     private val connected = CountDownLatch(1)
     @Volatile private var error: String? = null
     @Volatile private var closed = false
+    /** True once either side closed or reset the connection. */
+    val isClosed: Boolean get() = closed
     private val inbox = LinkedBlockingQueue<ByteArray>()
     private var cur = EOF
     private var curPos = 0
@@ -50,6 +52,12 @@ class MuxStream internal constructor(
         when {
             flags and UsbMux.TH_RST != 0 -> {
                 if (connected.count > 0) error = "Connection to port $dport refused"
+                closed = true
+                connected.countDown()
+                inbox.offer(EOF)
+            }
+            flags and UsbMux.TH_FIN != 0 -> {
+                if (payload.isNotEmpty()) inbox.offer(payload)
                 closed = true
                 connected.countDown()
                 inbox.offer(EOF)

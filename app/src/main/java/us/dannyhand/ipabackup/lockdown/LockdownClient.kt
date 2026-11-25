@@ -24,6 +24,7 @@ class LockdownClient(
     private var tls: ByteConnection? = null
     var sessionId: String? = null
         private set
+    @Volatile private var tlsLogging = true
 
     fun request(req: Map<String, Any?>): Map<String, Any?> {
         PlistService.send(channel, linkedMapOf<String, Any?>("Label" to label) + req)
@@ -68,7 +69,7 @@ class LockdownClient(
         sessionId = id
         if (r["EnableSessionSSL"] == true) {
             log("Starting session TLS…")
-            val conn = LegacyTls.connect(stream.asInputStream(), stream.asOutputStream(), record, log)
+            val conn = LegacyTls.connect(stream.asInputStream(), stream.asOutputStream(), record) { if (tlsLogging) log(it) }
             tls = conn
             channel = conn
         }
@@ -83,9 +84,11 @@ class LockdownClient(
         return ServiceInfo(port, r["EnableServiceSSL"] == true)
     }
 
+    /** Ends the session. Safe to call when the iPod already closed the connection. */
     fun stopSession() {
+        tlsLogging = false // close_notify / write-after-close alerts during teardown are expected noise
         val id = sessionId ?: return
-        runCatching { request(mapOf("Request" to "StopSession", "SessionID" to id)) }
+        if (!stream.isClosed) runCatching { request(mapOf("Request" to "StopSession", "SessionID" to id)) }
         sessionId = null
         tls?.close()
         tls = null

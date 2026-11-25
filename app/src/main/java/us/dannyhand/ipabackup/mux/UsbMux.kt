@@ -57,12 +57,21 @@ class UsbMux(
 
     /** Version exchange (+ setup packet for v2). Must be called before [start]. */
     fun handshake() {
+        // Throw away anything still queued from an earlier connection (seen after quick reconnects),
+        // otherwise it gets mistaken for the reply to our version packet.
+        val drained = drainStaleInput()
+        if (drained > 0) log("Discarded $drained stale bytes from a previous connection")
+
         val vh = ByteBuffer.allocate(12).putInt(2).putInt(0).putInt(0).array() // major 2, minor 0
         sendPacket(PROTO_VERSION, vh, null)
 
-        val pkt = readPacketBlocking(5000) ?: throw IOException("No version reply from device")
-        if (pkt.proto != PROTO_VERSION || pkt.payload.size < 8) {
-            throw IOException("Unexpected reply to version: proto=${pkt.proto} len=${pkt.payload.size}")
+        val deadline = System.currentTimeMillis() + 5000
+        var pkt: Packet
+        while (true) {
+            val left = deadline - System.currentTimeMillis()
+            pkt = (if (left > 0) readPacketBlocking(left) else null) ?: throw IOException("No version reply from device")
+            if (pkt.proto == PROTO_VERSION && pkt.payload.size >= 8) break
+            // Late packet from an old connection: ignore it and keep waiting.
         }
         val bb = ByteBuffer.wrap(pkt.payload)
         val major = bb.int
@@ -169,11 +178,32 @@ class UsbMux(
         val deadline = System.currentTimeMillis() + timeoutMs
         val buf = ByteArray(AppleUsbTransport.MAX_TRANSFER)
         while (System.currentTimeMillis() < deadline) {
-            reassembler.next(headerLen)?.let { return it }
-            val n = usb.read(buf, 500)
+            nextOrResync()?.let { return it }
+            val n = usb.read(buf, 200)
             if (n > 0) reassembler.add(buf, n)
         }
-        return reassembler.next(headerLen)
+        return nextOrResync()
+    }
+
+    /** During the handshake, garbage (a partial old packet) just gets dropped instead of failing. */
+    private fun nextOrResync(): Packet? = try {
+        reassembler.next(headerLen)
+    } catch (e: IOException) {
+        reassembler.clear()
+        null
+    }
+
+    private fun drainStaleInput(): Int {
+        val buf = ByteArray(AppleUsbTransport.MAX_TRANSFER)
+        var total = 0
+        val deadline = System.currentTimeMillis() + 3000
+        while (System.currentTimeMillis() < deadline) {
+            val n = usb.read(buf, 100)
+            if (n <= 0) break
+            total += n
+        }
+        reassembler.clear()
+        return total
     }
 
     override fun close() {
@@ -192,6 +222,8 @@ class UsbMux(
             System.arraycopy(src, 0, buf, size, n)
             size += n
         }
+
+        @Synchronized fun clear() { size = 0 }
 
         @Synchronized fun next(headerLen: Int): Packet? {
             if (size < 8) return null

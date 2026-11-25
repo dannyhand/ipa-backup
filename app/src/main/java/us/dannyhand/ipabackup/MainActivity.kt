@@ -175,7 +175,38 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- device session plumbing
 
     /** USB -> usbmux -> lockdownd session, runs [job] on a background thread, then tears down. */
-    private fun runOnDevice(device: UsbDevice, after: () -> Unit = {}, job: (UsbMux, LockdownClient) -> Unit) {
+    /**
+     * lockdownd connection that reconnects by itself: the iPod closes an idle lockdown connection
+     * after a while (e.g. during a long backup), and every service start goes through lockdownd.
+     */
+    private inner class DeviceSession(private val mux: UsbMux) {
+        private var stream: MuxStream = mux.connect(LockdownClient.PORT)
+        private var client: LockdownClient = openSession(stream)
+
+        fun startService(name: String): LockdownClient.ServiceInfo {
+            if (!stream.isClosed) {
+                try {
+                    return client.startService(name)
+                } catch (e: LockdownException) {
+                    throw e // a real answer from lockdownd (e.g. InvalidService), not a dead connection
+                } catch (e: IOException) {
+                    // fall through and reconnect
+                }
+            }
+            log("(lockdown connection was closed by the iPod; reconnecting)")
+            close()
+            stream = mux.connect(LockdownClient.PORT)
+            client = openSession(stream, quiet = true)
+            return client.startService(name)
+        }
+
+        fun close() {
+            client.stopSession()
+            runCatching { stream.close() }
+        }
+    }
+
+    private fun runOnDevice(device: UsbDevice, after: () -> Unit = {}, job: (UsbMux, DeviceSession) -> Unit) {
         if (busy) { log("Busy, please wait for the current operation to finish."); return }
         busy = true
         Thread {
@@ -184,13 +215,11 @@ class MainActivity : Activity() {
                     UsbMux(usb, ::log).use { mux ->
                         mux.handshake()
                         mux.start()
-                        mux.connect(LockdownClient.PORT).use { stream ->
-                            val lockdown = openSession(stream)
-                            try {
-                                job(mux, lockdown)
-                            } finally {
-                                lockdown.stopSession()
-                            }
+                        val session = DeviceSession(mux)
+                        try {
+                            job(mux, session)
+                        } finally {
+                            session.close()
                         }
                     }
                 }
@@ -205,13 +234,13 @@ class MainActivity : Activity() {
     }
 
     /** Pairs if needed (or re-pairs if the saved pairing is rejected), then starts a TLS session. */
-    private fun openSession(stream: MuxStream): LockdownClient {
+    private fun openSession(stream: MuxStream, quiet: Boolean = false): LockdownClient {
         val store = PairRecordStore(this)
-        val lockdown = LockdownClient(stream, log = ::log)
+        val lockdown = LockdownClient(stream, log = if (quiet) { _ -> } else ::log)
         val type = lockdown.queryType()
         if (type != "com.apple.mobile.lockdown") log("Unexpected QueryType: $type")
         val udid = lockdown.getValue("UniqueDeviceID") as String
-        log("${lockdown.getValue("DeviceName")}, iOS ${lockdown.getValue("ProductVersion")}")
+        if (!quiet) log("${lockdown.getValue("DeviceName")}, iOS ${lockdown.getValue("ProductVersion")}")
 
         var record = store.load(udid)
         var freshPair = false
@@ -253,14 +282,14 @@ class MainActivity : Activity() {
         return record
     }
 
-    private fun <T> withService(mux: UsbMux, lockdown: LockdownClient, name: String, block: (MuxStream) -> T): T {
+    private fun <T> withService(mux: UsbMux, lockdown: DeviceSession, name: String, block: (MuxStream) -> T): T {
         val svc = lockdown.startService(name)
         if (svc.ssl) throw IOException("$name wants SSL, which isn't supported yet")
         return mux.connect(svc.port).use(block)
     }
 
     /** Opens AFC2 if the iPod is jailbroken with AFC2 installed, else null. */
-    private fun tryAfc2(mux: UsbMux, lockdown: LockdownClient): MuxStream? = try {
+    private fun tryAfc2(mux: UsbMux, lockdown: DeviceSession): MuxStream? = try {
         val svc = lockdown.startService(AFC2_SERVICE)
         if (svc.ssl) null else mux.connect(svc.port)
     } catch (e: LockdownException) {
@@ -534,7 +563,7 @@ class MainActivity : Activity() {
     }
 
     /** house_arrest: zip the app's Documents/ and Library/ (minus Caches). Returns false if there's no data. */
-    private fun backupData(mux: UsbMux, lockdown: LockdownClient, saver: IpaSaver, app: InstallationProxy.App): Boolean =
+    private fun backupData(mux: UsbMux, lockdown: DeviceSession, saver: IpaSaver, app: InstallationProxy.App): Boolean =
         withService(mux, lockdown, HouseArrest.SERVICE) { stream ->
             HouseArrest.vendContainer(stream, app.bundleId)
             val afc = AfcClient(stream).apply { cancelCheck = ::checkStopNow }
