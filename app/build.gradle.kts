@@ -21,8 +21,8 @@ android {
         applicationId = "us.dannyhand.ipabackup"
         minSdk = 24
         targetSdk = 35
-        versionCode = 13
-        versionName = "1.3"
+        versionCode = 14
+        versionName = "1.4"
     }
     signingConfigs {
         if (releaseStoreFile != null) {
@@ -60,4 +60,5 @@ dependencies {
     implementation("org.bouncycastle:bcpkix-jdk18on:$bc")
     implementation("org.bouncycastle:bctls-jdk18on:$bc")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.xerial:sqlite-jdbc:3.46.1.3")
 }

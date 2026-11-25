@@ -23,6 +23,16 @@ class IpaSaver(private val context: Context) {
         fun clean(s: String) = s.replace(BAD, "_").trim()
         fun ipaName(name: String, version: String, bundleId: String) =
             "${clean(name)} ${clean(version)} (${clean(bundleId)}).ipa"
+        fun mimeType(fileName: String) = when (fileName.substringAfterLast('.', "").lowercase()) {
+            "zip" -> "application/zip"
+            "mp3" -> "audio/mpeg"
+            "m4a", "m4p", "m4b", "aac" -> "audio/mp4"
+            "wav" -> "audio/wav"
+            "aif", "aiff" -> "audio/aiff"
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            else -> "application/octet-stream"
+        }
         fun dataName(name: String, version: String, bundleId: String) =
             "${clean(name)} ${clean(version)} (${clean(bundleId)}) data.zip"
     }
@@ -74,7 +84,7 @@ class IpaSaver(private val context: Context) {
             findUris(fileName, sub).forEach { runCatching { resolver.delete(it, null, null) } } // replace old copy
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                put(MediaStore.Downloads.MIME_TYPE, if (fileName.endsWith(".zip")) "application/zip" else "application/octet-stream")
+                put(MediaStore.Downloads.MIME_TYPE, mimeType(fileName))
                 put(MediaStore.Downloads.RELATIVE_PATH, relPath(sub))
                 put(MediaStore.Downloads.IS_PENDING, 1)
             }

@@ -13,6 +13,9 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
 - **Jailbroken devices (AFC2):** if archiving fails, the app bundle is copied straight from the filesystem.
   **Browse files** shows the whole filesystem and saves any file or folder.
 - **Non-jailbroken devices:** Browse files shows the media folder (`/var/mobile/Media`)
+- **Music:** browse the iPod's music library by artist, title and album, search it, and copy songs as
+  `Artist - Title.mp3` to `Download/IPA Backup/Music/`
+- **Optional app icons** in the app list (off by default; fetched once and cached)
 - **Back up all** first shows the estimated total size and checks your phone's free space
 - **Browse files:** hold to select several files or folders and save them at once. Folder zips show an
   estimated size before saving, and the current path can be selected and copied.
@@ -54,6 +57,9 @@ Android's USB Host API:
 | `afc/` | Apple File Conduit: read files and folders; zips trees |
 | `housearrest/` | house_arrest: access an app's sandbox for data backups |
 | `plist/` | XML and binary property lists |
+| `springboard/` | springboardservices: app icons |
+| `music/` | Reads `iTunes_Control/iTunes/MediaLibrary.sqlitedb` (iOS 5+) |
+| `util/CgbiPng` | Converts Apple's "CgBI" iPhone PNGs to standard PNGs |
 
 The protocol details come from the excellent [libimobiledevice](https://libimobiledevice.org) project's
 documentation and source. No code was copied.

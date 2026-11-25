@@ -42,6 +42,9 @@ import us.dannyhand.ipabackup.mux.MuxStream
 import us.dannyhand.ipabackup.mux.UsbMux
 import us.dannyhand.ipabackup.pairing.PairRecord
 import us.dannyhand.ipabackup.pairing.PairRecordStore
+import us.dannyhand.ipabackup.springboard.SpringBoardServices
+import us.dannyhand.ipabackup.music.AndroidSqlDb
+import us.dannyhand.ipabackup.music.MusicLibrary
 import us.dannyhand.ipabackup.usb.AppleUsbTransport
 import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
@@ -54,6 +57,7 @@ class MainActivity : Activity() {
         /** Root-filesystem AFC, installed by the "Apple File Conduit 2" jailbreak package. */
         const val AFC2_SERVICE = "com.apple.afc2"
         const val FILES_SUBFOLDER = "Files"
+        const val MUSIC_SUBFOLDER = "Music"
     }
 
     private lateinit var logView: TextView
@@ -101,10 +105,11 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             val lp = { LinearLayout.LayoutParams(0, -2, 1f) }
             addView(button("Apps") { withDevice(::probe) }, lp())
-            addView(button("Browse files") { withDevice(::browseFiles) }, lp())
+            addView(button("Music") { withDevice(::browseMusic) }, lp())
+            addView(button("Files") { withDevice(::browseFiles) }, lp())
             addView(button("Copy log") { copyLog() }, lp())
         }
-        stopButton = button("Stop backup…") { confirmStop() }.apply {
+        stopButton = button("Stop…") { confirmStop() }.apply {
             visibility = View.GONE
             setTextColor(0xFFC62828.toInt())
         }
@@ -312,6 +317,28 @@ class MainActivity : Activity() {
         runOnDevice(device, after = { runOnUiThread { showPicker(device, apps) } }) { mux, lockdown ->
             apps = withService(mux, lockdown, InstallationProxy.SERVICE) { InstallationProxy(it).browseUserApps() }
             log("${apps.size} user apps installed.")
+            if (prefs.getBoolean("show_icons", false)) fetchIcons(mux, lockdown, apps)
+        }
+    }
+
+    /** Downloads home-screen icons for apps that aren't in the icon cache yet. */
+    private fun fetchIcons(mux: UsbMux, lockdown: DeviceSession, apps: List<InstallationProxy.App>) {
+        val cache = IconCache(this)
+        val missing = apps.filter { !cache.has(it) }
+        if (missing.isEmpty()) return
+        log("Loading ${missing.size} app icons…")
+        try {
+            withService(mux, lockdown, SpringBoardServices.SERVICE) { stream ->
+                val sbs = SpringBoardServices(stream)
+                var ok = 0
+                for (app in missing) {
+                    val png = runCatching { sbs.iconPng(app.bundleId) }.getOrNull() ?: continue
+                    if (runCatching { cache.put(app, png) }.getOrDefault(false)) ok++
+                }
+                if (ok < missing.size) log("Loaded $ok of ${missing.size} icons.")
+            }
+        } catch (e: Exception) {
+            log("Couldn't load icons: ${e.message}")
         }
     }
 
@@ -330,15 +357,49 @@ class MainActivity : Activity() {
             text = "Also back up app data (saves, settings) as a separate .zip"
             isChecked = prefs.getBoolean("include_data", false)
         }
+        val iconCache = IconCache(this)
+        val iconPx = (40 * resources.displayMetrics.density).toInt()
+        var showIcons = prefs.getBoolean("show_icons", false)
+        val adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_multiple_choice, labels) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val tv = super.getView(position, convertView, parent) as TextView
+                val icon = if (showIcons) iconCache.bitmap(apps[position]) else null
+                if (icon != null) {
+                    val d = android.graphics.drawable.BitmapDrawable(resources, icon).apply { setBounds(0, 0, iconPx, iconPx) }
+                    tv.setCompoundDrawablesRelative(d, null, null, null)
+                    tv.compoundDrawablePadding = pad / 2
+                } else {
+                    tv.setCompoundDrawablesRelative(null, null, null, null)
+                }
+                return tv
+            }
+        }
         val list = ListView(this).apply {
             choiceMode = ListView.CHOICE_MODE_MULTIPLE
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_multiple_choice, labels)
+            this.adapter = adapter
+        }
+        var pickerDialog: AlertDialog? = null
+        val iconBox = CheckBox(this).apply {
+            text = "Show app icons"
+            isChecked = showIcons
+            setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean("show_icons", checked).apply()
+                showIcons = checked
+                if (checked && apps.any { !iconCache.has(it) }) {
+                    // Icons come from the iPod: reconnect to fetch them, then this list reopens.
+                    pickerDialog?.dismiss()
+                    probe(device)
+                } else {
+                    adapter.notifyDataSetChanged()
+                }
+            }
         }
         val view = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad / 2, pad, 0)
             addView(skipBox)
             addView(dataBox)
+            addView(iconBox)
             addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.5).toInt()))
         }
 
@@ -361,6 +422,7 @@ class MainActivity : Activity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+            .also { pickerDialog = it }
     }
 
     /** "Back up all" safety check: what will run, how big it'll be, and whether the phone has room. */
@@ -581,24 +643,24 @@ class MainActivity : Activity() {
     private fun setStopButtonVisible(visible: Boolean) = runOnUiThread {
         stopButton.visibility = if (visible) View.VISIBLE else View.GONE
         stopButton.isEnabled = true
-        stopButton.text = "Stop backup…"
+        stopButton.text = "Stop…"
     }
 
     private fun confirmStop() {
         if (stopMode == StopMode.NOW) return
         AlertDialog.Builder(this)
-            .setTitle("Stop backup?")
-            .setMessage("Apps already saved are kept either way.")
+            .setTitle("Stop?")
+            .setMessage("Anything already saved is kept either way.")
             .setPositiveButton("Stop now") { _, _ ->
                 stopMode = StopMode.NOW
                 stopButton.isEnabled = false
                 stopButton.text = "Stopping…"
                 log("\nStopping now…")
             }
-            .setNeutralButton("After this app") { _, _ ->
+            .setNeutralButton("After this item") { _, _ ->
                 stopMode = StopMode.AFTER_CURRENT
-                stopButton.text = "Stopping after this app… (tap to stop now)"
-                log("\nWill stop after the current app finishes.")
+                stopButton.text = "Stopping after this item… (tap to stop now)"
+                log("\nWill stop after the current item finishes.")
             }
             .setNegativeButton("Keep going", null)
             .show()
@@ -1005,6 +1067,253 @@ class MainActivity : Activity() {
                 throw e
             }
         }
+    }
+
+    // ---------------------------------------------------------------- music browser
+
+    private sealed class MusicCmd {
+        object Show : MusicCmd()
+        data class Copy(val tracks: List<MusicLibrary.Track>) : MusicCmd()
+        object Close : MusicCmd()
+    }
+
+    /** Track pids checked in the music list; kept while the browser is open. */
+    private val musicSelected = HashSet<Long>()
+    private var musicQuery = ""
+
+    private fun browseMusic(device: UsbDevice) {
+        log("\nLoading the music library…")
+        val cmds = LinkedBlockingQueue<MusicCmd>()
+        musicSelected.clear()
+        musicQuery = ""
+        runOnDevice(device, after = { setStopButtonVisible(false); stopMode = StopMode.NONE }) { mux, lockdown ->
+            withService(mux, lockdown, AfcClient.SERVICE) { stream ->
+                val afc = AfcClient(stream)
+                val tracks = loadMusicLibrary(afc) ?: return@withService
+                log("${tracks.size} songs (${humanSize(tracks.sumOf { it.size })}) in the library.")
+                if (tracks.isEmpty()) return@withService
+                cmds.offer(MusicCmd.Show)
+                while (true) {
+                    val cmd = cmds.poll(15, TimeUnit.MINUTES) ?: break
+                    when (cmd) {
+                        is MusicCmd.Close -> break
+                        is MusicCmd.Show -> runOnUiThread { showMusic(tracks, cmds) }
+                        is MusicCmd.Copy -> {
+                            copySongs(afc, cmd.tracks)
+                            cmds.offer(MusicCmd.Show)
+                        }
+                    }
+                }
+            }
+            log("Music browser closed.")
+        }
+    }
+
+    /** Copies MediaLibrary.sqlitedb (plus its WAL files, if any) from the iPod and reads it. */
+    private fun loadMusicLibrary(afc: AfcClient): List<MusicLibrary.Track>? {
+        val dir = java.io.File(cacheDir, "medialib").apply { deleteRecursively(); mkdirs() }
+        for (suffix in listOf("", "-wal", "-shm")) {
+            val devicePath = MusicLibrary.DB_PATH + suffix
+            if (suffix.isNotEmpty() && runCatching { afc.stat(devicePath) }.isFailure) continue
+            try {
+                java.io.FileOutputStream(java.io.File(dir, "MediaLibrary.sqlitedb$suffix")).use { afc.copyFile(devicePath, it) }
+            } catch (e: Exception) {
+                if (suffix.isEmpty()) {
+                    log("No music library found on the iPod (${e.message}). iOS 5 or newer is needed.")
+                    return null
+                }
+            }
+        }
+        return try {
+            android.database.sqlite.SQLiteDatabase.openDatabase(
+                java.io.File(dir, "MediaLibrary.sqlitedb").path, null,
+                android.database.sqlite.SQLiteDatabase.OPEN_READWRITE, // it's our private copy
+            ).use { db -> MusicLibrary(AndroidSqlDb(db)).load() }
+        } catch (e: Exception) {
+            log("Couldn't read the music library: ${e.message}")
+            null
+        }
+    }
+
+    /** Searchable song list: tap to check/uncheck, Select all/none applies to what the search shows. */
+    private fun showMusic(tracks: List<MusicLibrary.Track>, cmds: LinkedBlockingQueue<MusicCmd>) {
+        if (isFinishing) { cmds.offer(MusicCmd.Close); return }
+        val density = resources.displayMetrics.density
+        val pad = (16 * density).toInt()
+        var visible: List<MusicLibrary.Track> = emptyList()
+
+        fun matches(t: MusicLibrary.Track, q: String) = q.isBlank() || q.trim().split(Regex("\\s+")).all { w ->
+            t.title.contains(w, true) || t.artist.contains(w, true) || t.album.contains(w, true)
+        }
+
+        val search = android.widget.EditText(this).apply {
+            hint = "Search artist, title or album"
+            setSingleLine()
+            setText(musicQuery)
+        }
+        val hintView = TextView(this).apply {
+            textSize = 12f
+            alpha = 0.7f
+            setPadding(pad / 4, 0, pad / 4, pad / 4)
+        }
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = visible.size
+            override fun getItem(position: Int) = visible[position]
+            override fun getItemId(position: Int) = visible[position].pid
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val tv = convertView as? TextView ?: TextView(this@MainActivity).apply {
+                    val v = (10 * density).toInt()
+                    setPadding(pad / 2, v, pad / 2, v)
+                    textSize = 15f
+                }
+                val t = visible[position]
+                val box = if (t.pid in musicSelected) "☑" else "☐"
+                val drm = if (t.isDrm) "  🔒" else ""
+                tv.text = "$box  ${t.title}$drm\n      ${t.artist} — ${t.album}  (${humanSize(t.size)})"
+                tv.setBackgroundColor(if (t.pid in musicSelected) 0x331E88E5 else 0)
+                return tv
+            }
+        }
+        val list = ListView(this).apply { this.adapter = adapter }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(search)
+            addView(hintView)
+            addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.55).toInt()))
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Music (${tracks.size} songs)")
+            .setView(container)
+            .setPositiveButton("Copy", null)
+            .setNeutralButton("Select all", null)
+            .setNegativeButton("Close", null)
+            .create()
+
+        var handled = false
+        fun go(cmd: MusicCmd) {
+            if (!handled) { handled = true; cmds.offer(cmd) }
+            dialog.dismiss()
+        }
+
+        fun refresh() {
+            visible = tracks.filter { matches(it, musicQuery) }
+            adapter.notifyDataSetChanged()
+            val selectedTracks = tracks.filter { it.pid in musicSelected }
+            hintView.text = "${visible.size} shown · ${selectedTracks.size} selected (${humanSize(selectedTracks.sumOf { it.size })})"
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
+                isEnabled = selectedTracks.isNotEmpty()
+                text = if (selectedTracks.isEmpty()) "Copy" else "Copy ${selectedTracks.size}"
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.text =
+                if (visible.isNotEmpty() && visible.all { it.pid in musicSelected }) "Select none" else "Select all"
+        }
+
+        search.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                musicQuery = s?.toString().orEmpty()
+                refresh()
+            }
+        })
+        list.setOnItemClickListener { _, _, position, _ ->
+            val pid = visible[position].pid
+            if (!musicSelected.add(pid)) musicSelected.remove(pid)
+            refresh()
+        }
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val chosen = tracks.filter { it.pid in musicSelected }
+                if (chosen.isNotEmpty()) {
+                    handled = true
+                    dialog.dismiss()
+                    confirmCopySongs(chosen, cmds)
+                }
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                if (visible.isNotEmpty() && visible.all { it.pid in musicSelected }) visible.forEach { musicSelected.remove(it.pid) }
+                else visible.forEach { musicSelected.add(it.pid) }
+                refresh()
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener { go(MusicCmd.Close) }
+            refresh()
+        }
+        dialog.setOnCancelListener { if (!handled) { handled = true; cmds.offer(MusicCmd.Close) } }
+        dialog.show()
+    }
+
+    private fun confirmCopySongs(chosen: List<MusicLibrary.Track>, cmds: LinkedBlockingQueue<MusicCmd>) {
+        val total = chosen.sumOf { it.size }
+        val drm = chosen.count { it.isDrm }
+        val free = runCatching {
+            android.os.StatFs(android.os.Environment.getExternalStorageDirectory().path).availableBytes
+        }.getOrDefault(-1L)
+        val msg = buildString {
+            append("Copy ${chosen.size} song${if (chosen.size == 1) "" else "s"} (${humanSize(total)}) as \"Artist - Title\" to ")
+            append("Download/${IpaSaver.FOLDER}/$MUSIC_SUBFOLDER/?")
+            if (free >= 0) {
+                append("\n\nFree space on this phone: ${humanSize(free)}")
+                if (total > free) append("\n⚠️ Not enough space for all of them.")
+            }
+            if (drm > 0) {
+                append("\n\n🔒 $drm of these are DRM-protected iTunes purchases (.m4p). ")
+                append("They'll only play in iTunes/Apple Music on a computer authorized for that Apple ID.")
+            }
+        }
+        var handled = false
+        AlertDialog.Builder(this)
+            .setMessage(msg)
+            .setPositiveButton("Copy") { _, _ -> handled = true; cmds.offer(MusicCmd.Copy(chosen)) }
+            .setNegativeButton("Back") { _, _ -> handled = true; cmds.offer(MusicCmd.Show) }
+            .setOnDismissListener { if (!handled) { handled = true; cmds.offer(MusicCmd.Show) } }
+            .show()
+    }
+
+    /** Worker thread: copies songs with Stop support, naming them "Artist - Title.ext". */
+    private fun copySongs(afc: AfcClient, tracks: List<MusicLibrary.Track>) {
+        val saver = IpaSaver(this)
+        val used = HashSet<String>()
+        var ok = 0
+        var failed = 0
+        var done = 0
+        stopMode = StopMode.NONE
+        keepScreenOn(true)
+        setStopButtonVisible(true)
+        afc.cancelCheck = ::checkStopNow
+        log("\nCopying ${tracks.size} songs to Download/${IpaSaver.FOLDER}/$MUSIC_SUBFOLDER/")
+        try {
+            for ((i, t) in tracks.withIndex()) {
+                if (stopMode != StopMode.NONE) break
+                val name = MusicLibrary.uniqueName(MusicLibrary.fileName(t), used)
+                log("[${i + 1}/${tracks.size}] $name")
+                val target = saver.create(name, MUSIC_SUBFOLDER)
+                try {
+                    afc.copyFile(t.devicePath, target.stream)
+                    target.commit()
+                    ok++
+                } catch (e: StopNowException) {
+                    target.discard()
+                    log("  stopped; the partial file was discarded")
+                    break
+                } catch (e: Exception) {
+                    target.discard()
+                    log("  FAILED: ${e.message}")
+                    failed++
+                }
+                done = i + 1
+            }
+        } finally {
+            afc.cancelCheck = {}
+            setStopButtonVisible(false)
+            keepScreenOn(false)
+        }
+        val stopped = stopMode != StopMode.NONE
+        stopMode = StopMode.NONE
+        log((if (stopped) "Stopped" else "Done") + ": $ok copied" +
+            (if (failed > 0) ", $failed failed" else "") +
+            (if (stopped && done < tracks.size) ", ${tracks.size - done} not copied" else "") + ".")
+        musicSelected.clear()
     }
 
     // ---------------------------------------------------------------- helpers
