@@ -24,6 +24,7 @@ class MusicLibrary(private val db: SqlDb) {
         ITUNES_U("iTunes U", "iTunes U"),
         VIDEO("Video", "Videos"),
         RINGTONE("Ringtone", "Ringtones"),
+        OTHER("Other audio", "Other Audio"),
     }
 
     data class Track(
@@ -76,8 +77,18 @@ class MusicLibrary(private val db: SqlDb) {
          * 0x100 movie, 0x200 TV show, 0x400 video podcast, 0x800 music video, 0x1000 iTunes U video,
          * 0x2000 home video. Extensions and flags fill in when the type is missing.
          */
-        fun kindOf(mediaType: Int?, ext: String, audibleFlag: Boolean = false, genre: String? = null): Kind {
+        fun kindOf(mediaType: Int?, ext: String, audibleFlag: Boolean = false, genre: String? = null, musicType: Int? = null): Kind {
             val mt = mediaType ?: 0
+            // iOS 6 numbers items differently from MPMediaType (songs are 8, podcasts 4, confirmed on an
+            // iPod touch 4G). When the library's music type isn't 1, use that numbering and don't guess the rest.
+            if (musicType != null && musicType != 1 && mediaType != null) {
+                return when {
+                    genre.equals("Podcast", ignoreCase = true) || mt == 4 -> Kind.PODCAST
+                    audibleFlag || ext == "m4b" || ext == "aa" -> Kind.AUDIOBOOK
+                    ext in VIDEO_EXTENSIONS -> Kind.VIDEO
+                    else -> Kind.OTHER
+                }
+            }
             return when {
                 genre.equals("Podcast", ignoreCase = true) -> Kind.PODCAST
                 mt and 0x400 != 0 -> Kind.PODCAST
@@ -96,7 +107,7 @@ class MusicLibrary(private val db: SqlDb) {
             val knownArtist = t.artist.takeIf { it != UNKNOWN_ARTIST }
             val knownAlbum = t.album.takeIf { it != UNKNOWN_ALBUM }
             val base = when (t.kind) {
-                Kind.MUSIC, Kind.AUDIOBOOK -> "${t.artist} - ${t.title}"
+                Kind.MUSIC, Kind.AUDIOBOOK, Kind.OTHER -> "${t.artist} - ${t.title}"
                 Kind.PODCAST, Kind.ITUNES_U -> listOfNotNull(knownAlbum ?: knownArtist, t.title).joinToString(" - ")
                 Kind.VIDEO -> listOfNotNull(knownArtist, t.title).joinToString(" - ")
                 Kind.RINGTONE -> t.title
@@ -247,7 +258,7 @@ class MusicLibrary(private val db: SqlDb) {
             val kind = when {
                 byFlag != null -> byFlag
                 raw.mediaType != null && raw.mediaType == musicType && ext !in VIDEO_EXTENSIONS -> Kind.MUSIC
-                else -> kindOf(raw.mediaType, ext, raw.audible, raw.track.genre)
+                else -> kindOf(raw.mediaType, ext, raw.audible, raw.track.genre, musicType)
             }
             raw.track.copy(kind = kind)
         }.sortedWith(

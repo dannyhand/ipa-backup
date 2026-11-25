@@ -137,6 +137,9 @@ class MusicLibraryTest {
             "INSERT INTO item VALUES $rows",
             "INSERT INTO item VALUES (100, 4, 'Ep 1', 'Host', 'Show', 'iTunes_Control/Music/F01/P.mp3', 'Podcast')",
             "INSERT INTO item VALUES (101, 2048, 'Clip', 'Someone', 'Vids', 'iTunes_Control/Music/F01/V.m4v', NULL)",
+            "INSERT INTO item VALUES (102, 4, 'Ep 2', 'Host', 'Show', 'iTunes_Control/Music/F01/Q.mp3', NULL)",
+            "INSERT INTO item VALUES (103, 2, 'Mystery', 'Who', 'What', 'iTunes_Control/Music/F01/M.m4a', NULL)",
+            "INSERT INTO item VALUES (104, 2, 'Book', 'Author', 'Novel', 'iTunes_Control/Music/F01/B.m4b', NULL)",
         )
         val lib = MusicLibrary(JdbcSqlDb(c))
         val tracks = lib.load()
@@ -144,6 +147,9 @@ class MusicLibraryTest {
         assertEquals(MusicLibrary.Kind.VIDEO, tracks.single { it.title == "Clip" }.kind)
         assertTrue(lib.diagnostics, lib.diagnostics.contains("music = 8"))
         assertEquals(MusicLibrary.Kind.PODCAST, tracks.single { it.title == "Ep 1" }.kind) // genre says Podcast
+        assertEquals(MusicLibrary.Kind.PODCAST, tracks.single { it.title == "Ep 2" }.kind) // iOS 6: 4 = podcast
+        assertEquals(MusicLibrary.Kind.OTHER, tracks.single { it.title == "Mystery" }.kind) // unknown: not guessed
+        assertEquals(MusicLibrary.Kind.AUDIOBOOK, tracks.single { it.title == "Book" }.kind) // .m4b
     }
 
     /** When per-item flags exist they win over media_type. */
