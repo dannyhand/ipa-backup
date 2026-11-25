@@ -79,6 +79,19 @@ class InstallationProxy(private val conn: ByteConnection) {
         )
     }
 
+    /**
+     * Installs an .ipa already uploaded over AFC to [packagePath] (relative to the media folder, e.g.
+     * "PublicStaging/game.ipa"), as ideviceinstaller does. For App Store apps iTunes also passes the purchase
+     * info and FairPlay license; the device still only accepts the app if it's signed into the Apple ID that
+     * bought it, or is jailbroken with AppSync (otherwise: ApplicationVerificationFailed).
+     */
+    fun install(packagePath: String, iTunesMetadata: ByteArray?, sinf: ByteArray?, progress: (String, Int?) -> Unit = { _, _ -> }) {
+        val options = LinkedHashMap<String, Any?>()
+        iTunesMetadata?.let { options["iTunesMetadata"] = it }
+        sinf?.let { options["ApplicationSINF"] = it }
+        runCommand(mapOf("Command" to "Install", "PackagePath" to packagePath, "ClientOptions" to options), progress)
+    }
+
     /** Deletes the device-side archive for [bundleId]. */
     fun removeArchive(bundleId: String) {
         runCommand(mapOf("Command" to "RemoveArchive", "ApplicationIdentifier" to bundleId)) { _, _ -> }

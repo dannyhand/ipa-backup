@@ -78,6 +78,30 @@ class IpaSaver(private val context: Context) {
         return names
     }
 
+    data class Saved(val name: String, val uri: Uri, val size: Long, val modifiedMs: Long)
+
+    /** Files this app saved in the folder whose names end with [suffix] (e.g. ".ipa", " data.zip"). */
+    fun listSaved(suffix: String, sub: String? = null): List<Saved> {
+        if (Build.VERSION.SDK_INT < 29) {
+            return legacyDir(sub).listFiles()?.filter { it.name.endsWith(suffix, true) && it.length() > 0 }
+                ?.map { Saved(it.name, Uri.fromFile(it), it.length(), it.lastModified()) } ?: emptyList()
+        }
+        val out = ArrayList<Saved>()
+        context.contentResolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME, MediaStore.Downloads.SIZE, MediaStore.Downloads.DATE_MODIFIED),
+            "${MediaStore.Downloads.RELATIVE_PATH} = ? AND ${MediaStore.Downloads.IS_PENDING} = 0",
+            arrayOf(relPath(sub)), null,
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val name = c.getString(1) ?: continue
+                if (!name.endsWith(suffix, true) || c.getLong(2) <= 0) continue
+                out += Saved(name, ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)), c.getLong(2), c.getLong(3) * 1000)
+            }
+        }
+        return out
+    }
+
     private fun findUris(fileName: String, sub: String?): List<Uri> {
         val uris = mutableListOf<Uri>()
         context.contentResolver.query(

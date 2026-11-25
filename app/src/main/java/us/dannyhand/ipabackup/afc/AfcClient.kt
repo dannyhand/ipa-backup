@@ -31,8 +31,15 @@ class AfcClient(private val conn: ByteConnection) {
         const val OP_FILE_OPEN_RES = 0x0EL
         const val OP_FILE_READ = 0x0FL
         const val OP_FILE_CLOSE = 0x14L
+        const val OP_REMOVE_PATH = 0x08L
+        const val OP_MAKE_DIR = 0x09L
+        const val OP_FILE_WRITE = 0x10L
 
         const val MODE_RDONLY = 1L
+        /** "w": write-only, create, truncate. */
+        const val MODE_WRONLY = 3L
+        /** libimobiledevice keeps writes to 32 KB per packet. */
+        const val WRITE_CHUNK = 1 shl 15
         const val READ_CHUNK = 1 shl 16
         private const val MAX_PACKET = 8 shl 20
 
@@ -48,10 +55,11 @@ class AfcClient(private val conn: ByteConnection) {
     /** Called before every chunk of a file copy; throw from it to abort (e.g. user pressed Stop). */
     @Volatile var cancelCheck: () -> Unit = {}
 
-    private fun send(op: Long, params: ByteArray) {
+    private fun send(op: Long, params: ByteArray, payload: ByteArray? = null, payloadLen: Int = payload?.size ?: 0) {
         val thisLen = HEADER + params.size
-        val bb = ByteBuffer.allocate(thisLen).order(ByteOrder.LITTLE_ENDIAN)
-        bb.put(MAGIC).putLong(thisLen.toLong()).putLong(thisLen.toLong()).putLong(packetNum++).putLong(op).put(params)
+        val bb = ByteBuffer.allocate(thisLen + payloadLen).order(ByteOrder.LITTLE_ENDIAN)
+        bb.put(MAGIC).putLong((thisLen + payloadLen).toLong()).putLong(thisLen.toLong()).putLong(packetNum++).putLong(op).put(params)
+        if (payload != null) bb.put(payload, 0, payloadLen)
         conn.write(bb.array())
     }
 
@@ -122,6 +130,46 @@ class AfcClient(private val conn: ByteConnection) {
     fun close(handle: Long) {
         send(OP_FILE_CLOSE, longs(handle))
         receive()
+    }
+
+    /** Creates a directory (and, like mkdir -p, its parents). Succeeds if it already exists. */
+    fun makeDir(path: String) {
+        send(OP_MAKE_DIR, cstr(path))
+        receive()
+    }
+
+    /** Deletes a file or an empty directory. */
+    fun remove(path: String) {
+        send(OP_REMOVE_PATH, cstr(path))
+        receive()
+    }
+
+    /** Uploads [input] to [path] (created or truncated). [progress] gets (bytesWritten, [total]). */
+    fun writeFile(path: String, input: java.io.InputStream, total: Long = -1, progress: (Long, Long) -> Unit = { _, _ -> }): Long {
+        cancelCheck()
+        val handle = open(path, MODE_WRONLY)
+        var written = 0L
+        try {
+            val buf = ByteArray(WRITE_CHUNK)
+            while (true) {
+                cancelCheck()
+                var n = 0
+                while (n < buf.size) { // fill the chunk, so packets stay a steady size
+                    val r = input.read(buf, n, buf.size - n)
+                    if (r < 0) break
+                    n += r
+                }
+                if (n == 0) break
+                send(OP_FILE_WRITE, longs(handle), buf, n)
+                receive()
+                written += n
+                progress(written, total)
+                if (n < buf.size) break
+            }
+        } finally {
+            runCatching { close(handle) }
+        }
+        return written
     }
 
     /** Reads up to [max] bytes from the start of a file (e.g. a JPEG's EXIF header). */

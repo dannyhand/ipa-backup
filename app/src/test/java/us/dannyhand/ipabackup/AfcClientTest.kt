@@ -3,6 +3,7 @@ package us.dannyhand.ipabackup
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import us.dannyhand.ipabackup.afc.AfcClient
 import us.dannyhand.ipabackup.afc.AfcException
@@ -14,9 +15,13 @@ import java.nio.ByteOrder
 import kotlin.random.Random
 
 /** Minimal fake AFC server: parses each request packet and queues the reply. */
-class FakeAfcDevice(private val files: Map<String, ByteArray>) : ByteConnection {
+class FakeAfcDevice(initial: Map<String, ByteArray>) : ByteConnection {
+    /** Files on the fake device; tests can inspect what was written. */
+    val files = LinkedHashMap(initial)
+    val dirs = HashSet<String>()
     private val reply = java.util.ArrayDeque<Byte>()
     private val openFiles = HashMap<Long, Pair<ByteArray, Int>>()
+    private val writeHandles = HashMap<Long, String>()
     private var nextHandle = 3L
 
     private fun packet(op: Long, params: ByteArray, payload: ByteArray = ByteArray(0)): ByteArray {
@@ -30,7 +35,7 @@ class FakeAfcDevice(private val files: Map<String, ByteArray>) : ByteConnection 
 
     val openHandles get() = openFiles.size
 
-    private fun isDir(p: String) = files.keys.any { it.startsWith(p.trimEnd('/') + "/") }
+    private fun isDir(p: String) = p.trimEnd('/') in dirs || files.keys.any { it.startsWith(p.trimEnd('/') + "/") }
 
     override fun write(data: ByteArray) {
         val bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
@@ -50,9 +55,26 @@ class FakeAfcDevice(private val files: Map<String, ByteArray>) : ByteConnection 
                 val names = files.keys.filter { it.startsWith(prefix) }.map { it.removePrefix(prefix).substringBefore('/') }.distinct()
                 packet(AfcClient.OP_DATA, ByteArray(0), (listOf(".", "..") + names).joinToString("") { it + "\u0000" }.toByteArray())
             } else status(8)
-            AfcClient.OP_FILE_OPEN -> files[path(8)]?.let {
+            AfcClient.OP_FILE_OPEN -> if (p.getLong(0) == AfcClient.MODE_WRONLY) {
+                val target = path(8)
+                if (target.substringBeforeLast('/', "") .let { it.isNotEmpty() && !isDir(it) }) status(8) else {
+                    files[target] = ByteArray(0)
+                    val h = nextHandle++; writeHandles[h] = target; packet(AfcClient.OP_FILE_OPEN_RES, le(h))
+                }
+            } else files[path(8)]?.let {
                 val h = nextHandle++; openFiles[h] = it to 0; packet(AfcClient.OP_FILE_OPEN_RES, le(h))
             } ?: status(8)
+            AfcClient.OP_FILE_WRITE -> {
+                val target = writeHandles.getValue(p.getLong(0))
+                files[target] = files.getValue(target) + data.copyOfRange(thisLen, data.size)
+                status(0)
+            }
+            AfcClient.OP_MAKE_DIR -> {
+                var d = ""
+                for (part in path(0).trim('/').split('/')) { d += "/$part"; dirs += d } // mkdir -p
+                status(0)
+            }
+            AfcClient.OP_REMOVE_PATH -> if (files.remove(path(0)) != null || dirs.remove(path(0).trimEnd('/'))) status(0) else status(8)
             AfcClient.OP_FILE_READ -> {
                 val h = p.getLong(0); val len = p.getLong(8).toInt()
                 val (bytes, pos) = openFiles.getValue(h)
@@ -61,7 +83,7 @@ class FakeAfcDevice(private val files: Map<String, ByteArray>) : ByteConnection 
                 // Real devices answer DATA with the bytes as payload (this_length = 40).
                 packet(AfcClient.OP_DATA, ByteArray(0), bytes.copyOfRange(pos, end))
             }
-            AfcClient.OP_FILE_CLOSE -> { openFiles.remove(p.getLong(0)); status(0) }
+            AfcClient.OP_FILE_CLOSE -> { openFiles.remove(p.getLong(0)); writeHandles.remove(p.getLong(0)); status(0) }
             else -> status(1)
         }
         out.forEach { reply.add(it) }
@@ -209,5 +231,35 @@ class MeasureTreeTest {
         assertThrows(us.dannyhand.ipabackup.afc.CancelledException::class.java) {
             afc.measureTree("/d", onProgress = { n++ }, isCancelled = { n >= 5 })
         }
+    }
+}
+
+class AfcWriteTest {
+    @Test
+    fun uploadMultiChunkFileThenRemove() {
+        val device = FakeAfcDevice(emptyMap())
+        val afc = AfcClient(device)
+        afc.makeDir("/PublicStaging")
+        val content = Random(11).nextBytes(AfcClient.WRITE_CHUNK * 3 + 777)
+        var last = 0L
+        val n = afc.writeFile("/PublicStaging/game.ipa", content.inputStream(), content.size.toLong()) { w, _ -> last = w }
+        assertEquals(content.size.toLong(), n)
+        assertEquals(content.size.toLong(), last)
+        assertArrayEquals(content, device.files["/PublicStaging/game.ipa"])
+        afc.remove("/PublicStaging/game.ipa")
+        assertTrue("/PublicStaging/game.ipa" !in device.files)
+    }
+
+    @Test
+    fun writeIntoMissingFolderFailsAndExactChunkSizeWorks() {
+        val device = FakeAfcDevice(emptyMap())
+        val afc = AfcClient(device)
+        assertThrows(AfcException::class.java) { afc.writeFile("/Nope/x.bin", ByteArray(10).inputStream()) }
+        afc.makeDir("/A/B/C") // parents created too
+        val exact = ByteArray(AfcClient.WRITE_CHUNK) { 5 }
+        afc.writeFile("/A/B/C/x.bin", exact.inputStream())
+        assertArrayEquals(exact, device.files["/A/B/C/x.bin"])
+        afc.writeFile("/A/B/C/empty.bin", ByteArray(0).inputStream())
+        assertEquals(0, device.files["/A/B/C/empty.bin"]!!.size)
     }
 }

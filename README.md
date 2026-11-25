@@ -11,6 +11,8 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
 - **Back up apps as `.ipa` files** to `Download/IPA Backup/`, one at a time or all at once
 - **Skips apps you've already saved**, so reruns only pick up what's new (✓ marks saved apps)
 - **Optional app data backup:** each app's `Documents/` and `Library/` (saves, settings) as a separate `… data.zip`
+- **Restore:** install `.ipa` backups (or any `.ipa` on the phone) back onto a device, optionally with
+  their app data. App Store apps need the Apple ID that bought them, or a jailbroken device with AppSync.
 - **Jailbroken devices (AFC2):** if archiving fails, the app bundle is copied straight from the filesystem.
   **Browse files** shows the whole filesystem and saves any file or folder.
 - **Non-jailbroken devices:** Browse files shows the media folder (`/var/mobile/Media`)
@@ -81,6 +83,7 @@ documentation and source. No code was copied.
 | Feature | Needs |
 |---|---|
 | Apps (.ipa) | iOS 8 or older (Apple removed app extraction in iOS 9); jailbroken devices with AFC2 on any version |
+| Restore (install .ipa) | Any iOS version the app supports; purchased apps need their Apple ID signed in, or AppSync |
 | App data, Music, Other Media, Photos, Voice Memos, Books | Any iOS version, no jailbreak |
 | Contacts, Notes, Bookmarks, Calendars, Messages | Jailbreak with AFC2 ("Apple File Conduit 2" from Cydia) |
 | Files | Media folder without a jailbreak; whole filesystem with AFC2 |

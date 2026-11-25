@@ -49,6 +49,8 @@ import us.dannyhand.ipabackup.music.ItlpLibrary
 import us.dannyhand.ipabackup.music.MusicLibrary
 import us.dannyhand.ipabackup.util.AudioTagger
 import us.dannyhand.ipabackup.util.ExifThumb
+import us.dannyhand.ipabackup.util.IpaInfo
+import us.dannyhand.ipabackup.afc.unzipInto
 import us.dannyhand.ipabackup.photos.CameraRoll
 import us.dannyhand.ipabackup.media.BooksLibrary
 import us.dannyhand.ipabackup.media.VoiceMemos
@@ -111,6 +113,7 @@ class MainActivity : Activity() {
         const val MEMOS_SUBFOLDER = "Voice Memos"
         const val BOOKS_SUBFOLDER = "Books"
         const val PERSONAL_SUBFOLDER = "Personal"
+        const val REQ_PICK_IPA = 41
         const val MENU_COPY_LOG = 1
         const val MENU_CLEAR_LOG = 2
         const val THUMB_PX = 200
@@ -162,6 +165,7 @@ class MainActivity : Activity() {
         // Feature buttons, at most three per row.
         val actions = listOf<Pair<String, (UsbDevice) -> Unit>>(
             "Apps" to ::probe,
+            "Restore" to ::showRestorePicker,
             "Music" to { d -> browseMusic(d, otherMedia = false) },
             "Photos" to ::browsePhotos,
             "Other Media" to { d -> browseMusic(d, otherMedia = true) },
@@ -297,6 +301,7 @@ class MainActivity : Activity() {
         private var stream: MuxStream = mux.connect(LockdownClient.PORT)
         private var client: LockdownClient = openSession(stream)
         val deviceName: String = runCatching { client.getValue("DeviceName") as String }.getOrDefault("iPod")
+        val productVersion: String? = runCatching { client.getValue("ProductVersion") as String }.getOrNull()
 
         fun startService(name: String): LockdownClient.ServiceInfo {
             if (!stream.isClosed) {
@@ -2664,6 +2669,217 @@ class MainActivity : Activity() {
                     log("Couldn't build the messages .zip: ${e.message}")
                 } finally {
                     afc.cancelCheck = {}
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- restore (install .ipa + app data)
+
+    /** An .ipa to install: one this app saved, or one picked with the system file picker. */
+    private class RestoreItem(val name: String, val uri: android.net.Uri, val size: Long)
+
+    /** Waiting for the system file picker; resumed in onActivityResult. */
+    private var pendingRestoreDevice: UsbDevice? = null
+
+    private fun bundleIdFromName(name: String) = Regex("\\(([^()]+)\\)(?: data\\.zip|\\.ipa)$").find(name)?.groupValues?.get(1)
+
+    private fun showRestorePicker(device: UsbDevice) {
+        val saver = IpaSaver(this)
+        val ipas = saver.listSaved(".ipa").sortedBy { it.name.lowercase() }
+        val dataIds = saver.listSaved(" data.zip").mapNotNull { bundleIdFromName(it.name) }.toSet()
+        val pad = (16 * resources.displayMetrics.density).toInt()
+
+        val dataBox = CheckBox(this).apply {
+            text = "Also restore app data (saves, settings) from a matching data .zip backup. " +
+                "This replaces the saves currently on the device."
+            isChecked = prefs.getBoolean("restore_data", false)
+        }
+        val labels = ipas.map { s ->
+            s.name.removeSuffix(".ipa") + "  (${humanSize(s.size)})" + if (bundleIdFromName(s.name) in dataIds) "  + data" else ""
+        }
+        val list = ListView(this).apply {
+            choiceMode = ListView.CHOICE_MODE_MULTIPLE
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_multiple_choice, labels)
+            isFastScrollEnabled = true
+        }
+        val view = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(TextView(this@MainActivity).apply {
+                text = if (ipas.isEmpty()) "No .ipa backups in Download/${IpaSaver.FOLDER}/ yet. Use \"Choose file…\" to pick one."
+                    else "Apps backed up to Download/${IpaSaver.FOLDER}/:"
+                textSize = 13f
+                alpha = 0.8f
+            })
+            addView(dataBox)
+            if (ipas.isNotEmpty()) addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.45).toInt()))
+        }
+        fun remember() = prefs.edit().putBoolean("restore_data", dataBox.isChecked).apply()
+        AlertDialog.Builder(this)
+            .setTitle("Install apps onto the device")
+            .setView(view)
+            .setPositiveButton("Install selected") { _, _ ->
+                remember()
+                val checked = list.checkedItemPositions
+                val chosen = ipas.filterIndexed { i, _ -> checked.get(i) }.map { RestoreItem(it.name, it.uri, it.size) }
+                if (chosen.isEmpty()) log("Nothing selected.") else confirmRestore(device, chosen, dataBox.isChecked)
+            }
+            .setNeutralButton("Choose file…") { _, _ ->
+                remember()
+                pendingRestoreDevice = device
+                @Suppress("DEPRECATION")
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                }, REQ_PICK_IPA)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    @Deprecated("Activity result API isn't available on the plain framework Activity")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_PICK_IPA) return
+        val device = pendingRestoreDevice ?: return
+        pendingRestoreDevice = null
+        if (resultCode != RESULT_OK || data == null) return
+        val uris = buildList {
+            data.clipData?.let { clip -> for (i in 0 until clip.itemCount) add(clip.getItemAt(i).uri) }
+            data.data?.let { if (it !in this) add(it) }
+        }
+        val items = uris.map { uri ->
+            var name = uri.lastPathSegment?.substringAfterLast('/') ?: "app.ipa"
+            var size = -1L
+            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME, android.provider.OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    c.getString(0)?.let { name = it }
+                    if (!c.isNull(1)) size = c.getLong(1)
+                }
+            }
+            RestoreItem(name, uri, size)
+        }
+        val notIpa = items.filter { !it.name.endsWith(".ipa", true) }
+        if (notIpa.isNotEmpty()) log("Skipping files that aren't .ipa: ${notIpa.joinToString { it.name }}")
+        val ipas = items - notIpa.toSet()
+        if (ipas.isNotEmpty()) confirmRestore(device, ipas, prefs.getBoolean("restore_data", false))
+    }
+
+    private fun confirmRestore(device: UsbDevice, items: List<RestoreItem>, restoreData: Boolean) {
+        val total = items.sumOf { maxOf(it.size, 0) }
+        val msg = buildString {
+            append("Install ${items.size} app${if (items.size == 1) "" else "s"} (${humanSize(total)}) onto the device?\n\n")
+            append("An app that's already installed is replaced by this version, keeping its data")
+            append(if (restoreData) ", except that saves from a matching data backup are written over it." else ".")
+            append("\n\nApp Store apps only install on a device signed into the Apple ID that bought them, ")
+            append("or on a jailbroken device with AppSync.")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Install apps?")
+            .setMessage(msg)
+            .setPositiveButton("Install") { _, _ -> runRestore(device, items, restoreData) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Turns installation_proxy error codes into something actionable. */
+    private fun explainInstallError(message: String?): String {
+        val m = message ?: "unknown error"
+        return m + when {
+            "ApplicationVerificationFailed" in m -> " (the device won't accept this app's signature/DRM: it must be signed into " +
+                "the Apple ID that bought it, or be jailbroken with AppSync)"
+            "DeviceOSVersionTooLow" in m -> " (the app needs a newer iOS)"
+            "PackageExtractionFailed" in m || "PackageInspectionFailed" in m -> " (the .ipa looks damaged or isn't an app)"
+            "InstallProhibited" in m -> " (installs are restricted on the device: check Settings → General → Restrictions)"
+            else -> ""
+        }
+    }
+
+    /**
+     * Uploads each .ipa to /PublicStaging over AFC, installs it with installation_proxy, removes the staged
+     * copy, then (optionally) writes the matching data backup into the app's sandbox via house_arrest.
+     */
+    private fun runRestore(device: UsbDevice, items: List<RestoreItem>, restoreData: Boolean) {
+        if (busy) { log("Busy, please wait for the current operation to finish."); return }
+        val dataZips = if (restoreData) IpaSaver(this).listSaved(" data.zip") else emptyList()
+        stopMode = StopMode.NONE
+        keepScreenOn(true)
+        setStopButtonVisible(true)
+        log("\nInstalling ${items.size} app(s)…")
+        runOnDevice(device, after = { setStopButtonVisible(false); stopMode = StopMode.NONE }) { mux, lockdown ->
+            withService(mux, lockdown, AfcClient.SERVICE) { afcStream ->
+                withService(mux, lockdown, InstallationProxy.SERVICE) { ipStream ->
+                    val afc = AfcClient(afcStream).apply { cancelCheck = ::checkStopNow }
+                    val ip = InstallationProxy(ipStream)
+                    afc.makeDir("/PublicStaging")
+                    var ok = 0
+                    var datas = 0
+                    var done = 0
+                    val failed = ArrayList<String>()
+                    for ((i, item) in items.withIndex()) {
+                        if (stopMode != StopMode.NONE) break
+                        try {
+                            val info = contentResolver.openInputStream(item.uri)?.use { IpaInfo.read(it) { b -> Plist.parse(b) } }
+                                ?: throw IOException("Can't open ${item.name}")
+                            val label = listOfNotNull(info.name ?: item.name.removeSuffix(".ipa"), info.version).joinToString(" ")
+                            log("\n[${i + 1}/${items.size}] $label" + (info.bundleId?.let { " ($it)" } ?: ""))
+                            if (IpaInfo.needsNewerOs(info.minimumOs, lockdown.productVersion)) {
+                                log("  needs iOS ${info.minimumOs}, but the device has iOS ${lockdown.productVersion}. Skipped.")
+                                failed += label
+                                done = i + 1
+                                continue
+                            }
+                            val staged = "PublicStaging/" + IpaSaver.clean(info.bundleId ?: item.name.removeSuffix(".ipa")) + ".ipa"
+                            try {
+                                var lastDecile = -1L
+                                contentResolver.openInputStream(item.uri)?.use { input ->
+                                    afc.writeFile("/$staged", input.buffered(1 shl 16), item.size) { w, t ->
+                                        val decile = if (t > 0) w * 10 / t else -1L
+                                        if (decile > lastDecile && decile % 2 == 0L) { lastDecile = decile; log("  uploading ${mb(w)} / ${mb(t)}") }
+                                    }
+                                } ?: throw IOException("Can't open ${item.name}")
+                                var lastPct = -1
+                                // Not stoppable mid-install: interrupting installd could leave the app half-installed.
+                                ip.install(staged, info.iTunesMetadata, info.sinf) { status, pct ->
+                                    if (pct != null && pct / 25 > lastPct / 25) { lastPct = pct; log("  installing… $pct% ($status)") }
+                                }
+                                log("  installed ✓")
+                                ok++
+                            } finally {
+                                runCatching { afc.remove("/$staged") }
+                            }
+                            if (restoreData) {
+                                val id = info.bundleId
+                                val dz = dataZips.filter { id != null && bundleIdFromName(it.name) == id }.maxByOrNull { it.modifiedMs }
+                                if (dz == null) {
+                                    log("  no data backup for this app")
+                                } else {
+                                    val n = withService(mux, lockdown, HouseArrest.SERVICE) { s ->
+                                        HouseArrest.vendContainer(s, id!!)
+                                        val box = AfcClient(s).apply { cancelCheck = ::checkStopNow }
+                                        contentResolver.openInputStream(dz.uri)?.use { box.unzipInto(it, "/", setOf("Documents", "Library")) } ?: 0
+                                    }
+                                    log("  restored $n data files from ${dz.name}")
+                                    datas++
+                                }
+                            }
+                        } catch (e: StopNowException) {
+                            log("  stopped")
+                            break
+                        } catch (e: Exception) {
+                            log("  FAILED: ${explainInstallError(e.message)}")
+                            failed += item.name
+                        }
+                        done = i + 1
+                    }
+                    val stopped = stopMode != StopMode.NONE
+                    log((if (stopped) "\nStopped" else "\nDone") + ": $ok installed" +
+                        (if (restoreData) ", $datas data restores" else "") +
+                        (if (stopped && done < items.size) ", ${items.size - done} not installed" else "") +
+                        (if (failed.isEmpty()) "." else "\nFailed: ${failed.joinToString()}"))
                 }
             }
         }
