@@ -1,4 +1,4 @@
-# IPA Backup
+# IPA Backup (Android app)
 
 Back up the apps on an old iPod Touch, iPhone or iPad to your Android phone over a USB cable,
 with no computer, no root on the phone, and no jailbreak needed on the iOS device. See Device support 
