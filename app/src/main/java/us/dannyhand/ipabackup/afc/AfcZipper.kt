@@ -41,6 +41,26 @@ class AfcZipper(
         return true
     }
 
+    /**
+     * Adds a small file uncompressed (STORED). EPUB requires its "mimetype" file first and stored,
+     * or readers reject the book.
+     */
+    fun addStored(devicePath: String, zipPath: String) = addStoredBytes(afc.readHead(devicePath, 1 shl 20), zipPath)
+
+    fun addStoredBytes(bytes: ByteArray, zipPath: String) {
+        val crc = java.util.zip.CRC32().apply { update(bytes) }
+        zip.putNextEntry(ZipEntry(zipPath).apply {
+            method = ZipEntry.STORED
+            size = bytes.size.toLong()
+            compressedSize = bytes.size.toLong()
+            this.crc = crc.value
+        })
+        zip.write(bytes)
+        zip.closeEntry()
+        files++
+        this.bytes += bytes.size
+    }
+
     private fun walk(path: String, zipPath: String) {
         if (exclude(zipPath)) return
         val e = afc.stat(path)

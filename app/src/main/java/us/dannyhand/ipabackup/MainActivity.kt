@@ -48,6 +48,15 @@ import us.dannyhand.ipabackup.music.MusicLibrary
 import us.dannyhand.ipabackup.util.AudioTagger
 import us.dannyhand.ipabackup.util.ExifThumb
 import us.dannyhand.ipabackup.photos.CameraRoll
+import us.dannyhand.ipabackup.media.BooksLibrary
+import us.dannyhand.ipabackup.media.VoiceMemos
+import us.dannyhand.ipabackup.personal.AddressBook
+import us.dannyhand.ipabackup.personal.BookmarksHtml
+import us.dannyhand.ipabackup.personal.NotesDb
+import us.dannyhand.ipabackup.personal.NotesExport
+import us.dannyhand.ipabackup.personal.SafariBookmarks
+import us.dannyhand.ipabackup.personal.VCard
+import us.dannyhand.ipabackup.plist.Plist
 import us.dannyhand.ipabackup.usb.AppleUsbTransport
 import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
@@ -62,6 +71,9 @@ class MainActivity : Activity() {
         const val FILES_SUBFOLDER = "Files"
         const val MUSIC_SUBFOLDER = "Music"
         const val PHOTOS_SUBFOLDER = "Photos"
+        const val MEMOS_SUBFOLDER = "Voice Memos"
+        const val BOOKS_SUBFOLDER = "Books"
+        const val PERSONAL_SUBFOLDER = "Personal"
         const val MENU_COPY_LOG = 1
         const val MENU_CLEAR_LOG = 2
         const val THUMB_PX = 200
@@ -122,9 +134,17 @@ class MainActivity : Activity() {
             visibility = View.GONE
             setTextColor(0xFFC62828.toInt())
         }
+        val buttons2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            val lp = { LinearLayout.LayoutParams(0, -2, 1f) }
+            addView(button("Voice Memos") { withDevice(::browseVoiceMemos) }, lp())
+            addView(button("Books") { withDevice(::browseBooks) }, lp())
+            addView(button("Contacts & Notes") { withDevice(::exportPersonalData) }, lp())
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(buttons)
+            addView(buttons2)
             addView(stopButton)
             addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
@@ -216,6 +236,7 @@ class MainActivity : Activity() {
     private inner class DeviceSession(private val mux: UsbMux) {
         private var stream: MuxStream = mux.connect(LockdownClient.PORT)
         private var client: LockdownClient = openSession(stream)
+        val deviceName: String = runCatching { client.getValue("DeviceName") as String }.getOrDefault("iPod")
 
         fun startService(name: String): LockdownClient.ServiceInfo {
             if (!stream.isClosed) {
@@ -1905,6 +1926,470 @@ class MainActivity : Activity() {
         progressDialog?.dismiss()
         progressDialog = null
         progressText = null
+    }
+
+    // ---------------------------------------------------------------- generic pick-and-save list
+
+    /** One row in a pick-and-save list. */
+    private class Pick(val key: String, val title: String, val subtitle: String, val size: Long)
+
+    private sealed class PickCmd {
+        object Show : PickCmd()
+        data class Save(val keys: List<String>) : PickCmd()
+        object Close : PickCmd()
+    }
+
+    /**
+     * Shared flow for Voice Memos and Books: load items on the worker thread, show a checklist,
+     * confirm with size / free space, then save the selection with Stop support.
+     */
+    private fun <T> runPicker(
+        device: UsbDevice,
+        what: String,
+        dialogTitle: String,
+        subfolder: String,
+        load: (AfcClient) -> List<T>,
+        pick: (T) -> Pick,
+        saveOne: (AfcClient, IpaSaver, T, MutableSet<String>) -> String,
+        confirmNote: (List<T>) -> String? = { null },
+    ) {
+        log("\nReading $what…")
+        val cmds = LinkedBlockingQueue<PickCmd>()
+        val selected = HashSet<String>()
+        runOnDevice(device, after = { setStopButtonVisible(false); stopMode = StopMode.NONE }) { mux, lockdown ->
+            withService(mux, lockdown, AfcClient.SERVICE) { stream ->
+                val afc = AfcClient(stream)
+                val items = load(afc)
+                if (items.isEmpty()) { log("No $what found on the iPod."); return@withService }
+                val picks = items.map(pick)
+                val byKey = items.associateBy { pick(it).key }
+                log("${items.size} $what (${humanSize(picks.sumOf { it.size })}).")
+                cmds.offer(PickCmd.Show)
+                while (true) {
+                    val cmd = cmds.poll(15, TimeUnit.MINUTES) ?: break
+                    when (cmd) {
+                        is PickCmd.Close -> break
+                        is PickCmd.Show -> runOnUiThread {
+                            showChecklist(dialogTitle, picks, selected, cmds) { chosen ->
+                                confirmPicks(what, subfolder, chosen, chosen.mapNotNull { byKey[it.key] }.let(confirmNote), cmds)
+                            }
+                        }
+                        is PickCmd.Save -> {
+                            val chosen = cmd.keys.mapNotNull { byKey[it] }
+                            savePicks(afc, what, subfolder, chosen, saveOne)
+                            selected.clear()
+                            cmds.offer(PickCmd.Show)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showChecklist(
+        title: String,
+        picks: List<Pick>,
+        selected: MutableSet<String>,
+        cmds: LinkedBlockingQueue<PickCmd>,
+        onSave: (List<Pick>) -> Unit,
+    ) {
+        if (isFinishing) { cmds.offer(PickCmd.Close); return }
+        val density = resources.displayMetrics.density
+        val pad = (16 * density).toInt()
+        val hint = TextView(this).apply { textSize = 12f; alpha = 0.7f; setPadding(pad, pad / 4, pad, pad / 4) }
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = picks.size
+            override fun getItem(position: Int) = picks[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val tv = convertView as? TextView ?: TextView(this@MainActivity).apply {
+                    val v = (10 * density).toInt()
+                    setPadding(pad, v, pad, v)
+                    textSize = 15f
+                }
+                val p = picks[position]
+                tv.text = (if (p.key in selected) "☑  " else "☐  ") + p.title + "\n      " + p.subtitle
+                tv.setBackgroundColor(if (p.key in selected) 0x331E88E5 else 0)
+                return tv
+            }
+        }
+        val list = ListView(this).apply {
+            this.adapter = adapter
+            isFastScrollEnabled = true
+            isFastScrollAlwaysVisible = picks.size > 30
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(hint)
+            addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.55).toInt()))
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(container)
+            .setPositiveButton("Save", null)
+            .setNeutralButton("Select all", null)
+            .setNegativeButton("Close", null)
+            .create()
+        var handled = false
+        fun refresh() {
+            adapter.notifyDataSetChanged()
+            val chosen = picks.filter { it.key in selected }
+            hint.text = "${picks.size} items · ${chosen.size} selected (${humanSize(chosen.sumOf { it.size })}) · tap to select"
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
+                isEnabled = chosen.isNotEmpty()
+                text = if (chosen.isEmpty()) "Save" else "Save ${chosen.size}"
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.text = if (chosen.size == picks.size) "Select none" else "Select all"
+        }
+        list.setOnItemClickListener { _, _, position, _ ->
+            val k = picks[position].key
+            if (!selected.add(k)) selected.remove(k)
+            refresh()
+        }
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val chosen = picks.filter { it.key in selected }
+                if (chosen.isNotEmpty()) { handled = true; dialog.dismiss(); onSave(chosen) }
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                if (selected.size == picks.size) selected.clear() else picks.forEach { selected += it.key }
+                refresh()
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+                if (!handled) { handled = true; cmds.offer(PickCmd.Close) }
+                dialog.dismiss()
+            }
+            refresh()
+        }
+        dialog.setOnCancelListener { if (!handled) { handled = true; cmds.offer(PickCmd.Close) } }
+        dialog.show()
+    }
+
+    private fun confirmPicks(what: String, subfolder: String, chosen: List<Pick>, note: String?, cmds: LinkedBlockingQueue<PickCmd>) {
+        val total = chosen.sumOf { it.size }
+        val free = runCatching {
+            android.os.StatFs(android.os.Environment.getExternalStorageDirectory().path).availableBytes
+        }.getOrDefault(-1L)
+        val msg = buildString {
+            append("Save ${chosen.size} ${if (chosen.size == 1) what.removeSuffix("s") else what} (${humanSize(total)}) to ")
+            append("Download/${IpaSaver.FOLDER}/$subfolder/?")
+            note?.let { append("\n\n").append(it) }
+            if (free >= 0) {
+                append("\n\nFree space on this phone: ${humanSize(free)}")
+                if (total > free) append("\n⚠️ Not enough space for all of them.")
+            }
+        }
+        var handled = false
+        AlertDialog.Builder(this)
+            .setMessage(msg)
+            .setPositiveButton("Save") { _, _ -> handled = true; cmds.offer(PickCmd.Save(chosen.map { it.key })) }
+            .setNegativeButton("Back") { _, _ -> handled = true; cmds.offer(PickCmd.Show) }
+            .setOnDismissListener { if (!handled) { handled = true; cmds.offer(PickCmd.Show) } }
+            .show()
+    }
+
+    private fun <T> savePicks(
+        afc: AfcClient,
+        what: String,
+        subfolder: String,
+        items: List<T>,
+        saveOne: (AfcClient, IpaSaver, T, MutableSet<String>) -> String,
+    ) {
+        val saver = IpaSaver(this)
+        val used = HashSet<String>()
+        var ok = 0
+        var failed = 0
+        var done = 0
+        stopMode = StopMode.NONE
+        keepScreenOn(true)
+        setStopButtonVisible(true)
+        afc.cancelCheck = ::checkStopNow
+        log("\nSaving ${items.size} $what to Download/${IpaSaver.FOLDER}/$subfolder/")
+        try {
+            for ((i, item) in items.withIndex()) {
+                if (stopMode != StopMode.NONE) break
+                try {
+                    val where = saveOne(afc, saver, item, used)
+                    log("[${i + 1}/${items.size}] ${where.substringAfterLast('/')}")
+                    ok++
+                } catch (e: StopNowException) {
+                    log("  stopped; the partial file was discarded")
+                    break
+                } catch (e: Exception) {
+                    log("[${i + 1}/${items.size}] FAILED: ${e.message}")
+                    failed++
+                }
+                done = i + 1
+            }
+        } finally {
+            afc.cancelCheck = {}
+            setStopButtonVisible(false)
+            keepScreenOn(false)
+        }
+        val stopped = stopMode != StopMode.NONE
+        stopMode = StopMode.NONE
+        log((if (stopped) "Stopped" else "Done") + ": $ok saved" +
+            (if (failed > 0) ", $failed failed" else "") +
+            (if (stopped && done < items.size) ", ${items.size - done} not saved" else "") + ".")
+    }
+
+    /** Copies a SQLite database (plus -wal/-shm/-journal companions) into app cache. Null if it isn't there. */
+    private fun copySqlite(afc: AfcClient, devicePath: String, tag: String): java.io.File? {
+        val dir = java.io.File(cacheDir, "db/$tag").apply { deleteRecursively(); mkdirs() }
+        val name = devicePath.substringAfterLast('/')
+        for (suffix in listOf("", "-wal", "-shm", "-journal")) {
+            val src = devicePath + suffix
+            if (suffix.isNotEmpty() && runCatching { afc.stat(src) }.isFailure) continue
+            try {
+                java.io.FileOutputStream(java.io.File(dir, name + suffix)).use { afc.copyFile(src, it) }
+            } catch (e: Exception) {
+                if (suffix.isEmpty()) return null
+            }
+        }
+        return java.io.File(dir, name)
+    }
+
+    private fun <R> withSqlite(file: java.io.File, block: (us.dannyhand.ipabackup.music.SqlDb) -> R): R =
+        android.database.sqlite.SQLiteDatabase.openDatabase(
+            file.path, null, android.database.sqlite.SQLiteDatabase.OPEN_READWRITE, // our private copy
+        ).use { block(AndroidSqlDb(it)) }
+
+    private fun shortDate(ms: Long): String =
+        java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT).format(java.util.Date(ms))
+
+    /** Saves [devicePath] as [name]; stages through cache and writes tags when [tags] is given (m4a/mp3). */
+    private fun saveAudio(afc: AfcClient, saver: IpaSaver, devicePath: String, name: String, sub: String, dateMs: Long?, tags: AudioTagger.Tags?): String {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        val target = saver.create(name, sub, dateMs)
+        try {
+            if (tags != null && ext in TAGGABLE) {
+                val tmp = java.io.File(cacheDir, "audio.tmp")
+                try {
+                    java.io.FileOutputStream(tmp).use { afc.copyFile(devicePath, it) }
+                    try {
+                        AudioTagger.writeTagged(tmp, ext, tags, target.stream)
+                    } catch (e: Exception) {
+                        target.discard()
+                        val plain = saver.create(name, sub, dateMs)
+                        tmp.inputStream().use { it.copyTo(plain.stream) }
+                        plain.commit()
+                        return plain.location
+                    }
+                } finally {
+                    tmp.delete()
+                }
+            } else {
+                afc.copyFile(devicePath, target.stream)
+            }
+            target.commit()
+            return target.location
+        } catch (e: Exception) {
+            target.discard()
+            throw e
+        }
+    }
+
+    // ---------------------------------------------------------------- voice memos
+
+    private fun browseVoiceMemos(device: UsbDevice) = runPicker(
+        device = device,
+        what = "voice memos",
+        dialogTitle = "Voice Memos",
+        subfolder = MEMOS_SUBFOLDER,
+        load = { afc ->
+            val files = runCatching { afc.readDir(VoiceMemos.DIR) }.getOrDefault(emptyList()).mapNotNull { n ->
+                val e = runCatching { afc.stat("${VoiceMemos.DIR}/$n") }.getOrNull() ?: return@mapNotNull null
+                if (e.isDir) null else VoiceMemos.FileEntry(n, e.size, e.mtimeMs)
+            }
+            val meta = runCatching {
+                copySqlite(afc, VoiceMemos.DB_PATH, "recordings")?.let { f -> withSqlite(f) { VoiceMemos.readDb(it) } }
+            }.onFailure { log("(Couldn't read Recordings.db: ${it.message}; using file dates)") }.getOrNull() ?: emptyMap()
+            VoiceMemos.combine(files, meta)
+        },
+        pick = { m ->
+            val dur = m.durationSec?.let { s -> " · %d:%02d".format(s.toInt() / 60, s.toInt() % 60) } ?: ""
+            Pick(m.devicePath, m.label ?: "Voice Memo", "${shortDate(m.dateMs)}$dur · ${humanSize(m.size)}", m.size)
+        },
+        saveOne = { afc, saver, m, used ->
+            val title = (m.label ?: "Voice Memo") + " " + shortDate(m.dateMs)
+            val year = java.util.Calendar.getInstance().apply { timeInMillis = m.dateMs }.get(java.util.Calendar.YEAR)
+            saveAudio(afc, saver, m.devicePath, MusicLibrary.uniqueName(m.saveName(), used), MEMOS_SUBFOLDER, m.dateMs,
+                AudioTagger.Tags(title = title, album = "Voice Memos", year = year))
+        },
+    )
+
+    // ---------------------------------------------------------------- books
+
+    private fun browseBooks(device: UsbDevice) = runPicker(
+        device = device,
+        what = "books",
+        dialogTitle = "Books",
+        subfolder = BOOKS_SUBFOLDER,
+        load = { afc ->
+            val metas = BooksLibrary.PLISTS.flatMap { p ->
+                runCatching { BooksLibrary.parsePlist(Plist.parse(afc.readHead(p, 16 shl 20)), p.substringBeforeLast('/')) }
+                    .getOrDefault(emptyList())
+            }.associateBy { it.relPath.lowercase() }
+            val books = ArrayList<BooksLibrary.Book>()
+            for (dir in listOf(BooksLibrary.DIR, "${BooksLibrary.DIR}/Purchases")) {
+                val names = runCatching { afc.readDir(dir) }.getOrNull() ?: continue
+                for (n in names) {
+                    if (n.substringAfterLast('.', "").lowercase() !in BooksLibrary.BOOK_EXT) continue
+                    val path = "$dir/$n"
+                    val e = runCatching { afc.stat(path) }.getOrNull() ?: continue
+                    val meta = metas[path.lowercase()]
+                    val drm = e.isDir && runCatching { afc.stat("$path/META-INF/sinf.xml") }.isSuccess
+                    books += BooksLibrary.Book(path, meta?.title ?: n.substringBeforeLast('.'), meta?.author, e.isDir,
+                        if (e.isDir) 0 else e.size, drm)
+                }
+            }
+            books.sortedWith(compareBy({ (it.author ?: "~").lowercase() }, { it.title.lowercase() }))
+        },
+        pick = { b ->
+            val kind = b.extension.uppercase() + if (b.isFolder) "" else " · ${humanSize(b.size)}"
+            Pick(b.devicePath, b.title + if (b.drm) "  🔒" else "", listOfNotNull(b.author, kind).joinToString(" · "), b.size)
+        },
+        saveOne = { afc, saver, b, used ->
+            val name = MusicLibrary.uniqueName(b.saveName(), used)
+            val target = saver.create(name, BOOKS_SUBFOLDER)
+            try {
+                if (b.isFolder) {
+                    // iTunes stores EPUBs unzipped; rebuild a valid .epub (stored "mimetype" first).
+                    val zos = AfcZipper.open(target.stream)
+                    val z = AfcZipper(afc, zos)
+                    if (runCatching { afc.stat("${b.devicePath}/mimetype") }.isSuccess) z.addStored("${b.devicePath}/mimetype", "mimetype")
+                    else z.addStoredBytes("application/epub+zip".toByteArray(), "mimetype")
+                    z.addTree(b.devicePath, "") {
+                        it != "mimetype" && it != "iTunesMetadata.plist" && it != "iTunesArtwork" && it != "iTunesMetadata-original.plist"
+                    }
+                    zos.finish()
+                } else {
+                    afc.copyFile(b.devicePath, target.stream)
+                }
+                target.commit()
+                target.location
+            } catch (e: Exception) {
+                target.discard()
+                throw e
+            }
+        },
+        confirmNote = { chosen ->
+            val folders = chosen.count { it.isFolder }
+            val drm = chosen.count { it.drm }
+            listOfNotNull(
+                if (folders > 0) "$folders EPUB${if (folders == 1) " is" else "s are"} stored unzipped on the iPod and will be repackaged as .epub (size not included above)." else null,
+                if (drm > 0) "🔒 $drm ${if (drm == 1) "is an iBookstore purchase" else "are iBookstore purchases"} with DRM; they'll only open in Apple Books." else null,
+            ).joinToString("\n\n").ifEmpty { null }
+        },
+    )
+
+    // ---------------------------------------------------------------- contacts, notes, bookmarks
+
+    private fun exportPersonalData(device: UsbDevice) {
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        fun box(label: String, key: String) = CheckBox(this).apply { text = label; isChecked = prefs.getBoolean(key, true) }
+        val contacts = box("Contacts → .vcf (imports into Google Contacts)", "export_contacts")
+        val notes = box("Notes → .html, plus a .zip of text files", "export_notes")
+        val bookmarks = box("Safari bookmarks & Reading List → .html (imports into any browser)", "export_bookmarks")
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(TextView(this@MainActivity).apply {
+                text = "Saves to Download/${IpaSaver.FOLDER}/$PERSONAL_SUBFOLDER/. Needs a jailbroken iPod with AFC2."
+                textSize = 13f
+                alpha = 0.8f
+            })
+            addView(contacts)
+            addView(notes)
+            addView(bookmarks)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Contacts, Notes & Bookmarks")
+            .setView(body)
+            .setPositiveButton("Export") { _, _ ->
+                prefs.edit().putBoolean("export_contacts", contacts.isChecked).putBoolean("export_notes", notes.isChecked)
+                    .putBoolean("export_bookmarks", bookmarks.isChecked).apply()
+                if (contacts.isChecked || notes.isChecked || bookmarks.isChecked)
+                    runPersonalExport(device, contacts.isChecked, notes.isChecked, bookmarks.isChecked)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun runPersonalExport(device: UsbDevice, doContacts: Boolean, doNotes: Boolean, doBookmarks: Boolean) {
+        log("\nExporting personal data…")
+        runOnDevice(device) { mux, lockdown ->
+            val stream = tryAfc2(mux, lockdown) ?: run {
+                log("Contacts, notes and bookmarks live in system folders that need a jailbroken device with " +
+                    "AFC2 (\"Apple File Conduit 2\" from Cydia). Voice Memos and Books work without it.")
+                return@runOnDevice
+            }
+            stream.use {
+                val afc = AfcClient(stream)
+                val saver = IpaSaver(this)
+                val stamp = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+                val owner = lockdown.deviceName
+
+                fun saveText(name: String, text: String): String {
+                    val t = saver.create(name, PERSONAL_SUBFOLDER)
+                    try {
+                        t.stream.write(text.toByteArray(Charsets.UTF_8))
+                        t.commit()
+                        return t.location
+                    } catch (e: Exception) {
+                        t.discard()
+                        throw e
+                    }
+                }
+
+                if (doContacts) try {
+                    val db = copySqlite(afc, AddressBook.DB_PATH, "contacts") ?: throw IOException("AddressBook.sqlitedb not found")
+                    val list = withSqlite(db) { AddressBook(it).load() }
+                    val where = saveText("Contacts ($owner) $stamp.vcf", VCard.write(list))
+                    log("Contacts: ${list.size} saved to $where")
+                } catch (e: Exception) {
+                    log("Contacts FAILED: ${e.message}")
+                }
+
+                if (doNotes) try {
+                    val db = copySqlite(afc, NotesDb.DB_PATH, "notes") ?: throw IOException("notes.sqlite not found")
+                    val list = withSqlite(db) { NotesDb(it).load() }
+                    val df = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
+                    val where = saveText("Notes ($owner) $stamp.html", NotesExport.html(list, owner, df))
+                    // Plus one .txt per note, for search or import elsewhere.
+                    val t = saver.create("Notes ($owner) $stamp (text).zip", PERSONAL_SUBFOLDER)
+                    try {
+                        val zos = java.util.zip.ZipOutputStream(t.stream)
+                        val used = HashSet<String>()
+                        val day = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+                        for (n in list) {
+                            val prefix = (n.modifiedMs ?: n.createdMs)?.let { day.format(java.util.Date(it)) + " " } ?: ""
+                            val name = MusicLibrary.uniqueName(IpaSaver.clean(prefix + n.title).take(100) + ".txt", used)
+                            zos.putNextEntry(java.util.zip.ZipEntry(name).apply { (n.modifiedMs ?: n.createdMs)?.let { time = it } })
+                            zos.write(NotesExport.toText(n.html).toByteArray(Charsets.UTF_8))
+                            zos.closeEntry()
+                        }
+                        zos.finish()
+                        t.commit()
+                    } catch (e: Exception) {
+                        t.discard()
+                        throw e
+                    }
+                    log("Notes: ${list.size} saved to $where (and a .zip of text files)")
+                } catch (e: Exception) {
+                    log("Notes FAILED: ${e.message}")
+                }
+
+                if (doBookmarks) try {
+                    val db = copySqlite(afc, SafariBookmarks.DB_PATH, "bookmarks") ?: throw IOException("Bookmarks.db not found")
+                    val root = withSqlite(db) { SafariBookmarks(it).load() }
+                    val where = saveText("Safari Bookmarks ($owner) $stamp.html", BookmarksHtml.write(root))
+                    log("Safari bookmarks: ${root.count()} saved to $where")
+                } catch (e: Exception) {
+                    log("Safari bookmarks FAILED: ${e.message}")
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- helpers

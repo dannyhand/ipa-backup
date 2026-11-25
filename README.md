@@ -18,6 +18,10 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
   album, album artist, genre, composer, year, track/disc) is written into the files, since iTunes strips it.
 - **Photos & videos:** browse the camera roll (`DCIM`) as a thumbnail grid, preview full-size or play,
   and save originals (with their dates) to `Download/IPA Backup/Photos/`
+- **Voice Memos:** saved with their recording date and label as the file name, tagged for music players
+- **Books:** iBooks EPUBs (repackaged into valid `.epub` files) and PDFs, named `Author - Title`
+- **Contacts, Notes & Safari bookmarks** (jailbroken devices with AFC2): contacts as `.vcf`, notes as HTML
+  plus a zip of text files, bookmarks and Reading List as a browser-importable HTML file
 - **Optional app icons** in the app list (off by default; fetched once and cached)
 - **Back up all** first shows the estimated total size and checks your phone's free space
 - **Browse files:** hold to select several files or folders and save them at once. Folder zips show an
@@ -64,6 +68,8 @@ Android's USB Host API:
 | `music/` | Reads `iTunes_Control/iTunes/MediaLibrary.sqlitedb` (iOS 5+) |
 | `util/AudioTagger` | Writes MP4 (ilst) and ID3v2.3 tags; keeps audio data byte-identical |
 | `photos/`, `util/ExifThumb` | Camera roll listing; thumbnails from the EXIF preview in each photo's first few KB |
+| `media/` | Voice Memos (`Recordings.db`) and iBooks (`Books.plist`) readers |
+| `personal/` | AddressBook → vCard, Notes → HTML/text, Safari `Bookmarks.db` → Netscape bookmark HTML |
 | `util/CgbiPng` | Converts Apple's "CgBI" iPhone PNGs to standard PNGs |
 
 The protocol details come from the excellent [libimobiledevice](https://libimobiledevice.org) project's
