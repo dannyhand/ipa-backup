@@ -33,6 +33,9 @@ import android.widget.TextView
 import android.widget.Toast
 import us.dannyhand.ipabackup.afc.AfcClient
 import us.dannyhand.ipabackup.afc.AfcException
+import us.dannyhand.ipabackup.certs.McInstall
+import us.dannyhand.ipabackup.certs.ProfileServer
+import us.dannyhand.ipabackup.certs.RootProfile
 import us.dannyhand.ipabackup.afc.AfcZipper
 import us.dannyhand.ipabackup.afc.CancelledException
 import us.dannyhand.ipabackup.afc.TreeSize
@@ -79,6 +82,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.CleaningServices
+import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Contacts
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Forum
@@ -190,6 +194,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             Feature("Contacts & Notes", Icons.Outlined.Contacts, "Personal data", needsJailbreak = true) { withDevice(::exportPersonalData) },
             Feature("Files", Icons.Outlined.FolderOpen, "Tools") { withDevice(::browseFiles) },
             Feature("Clean up", Icons.Outlined.CleaningServices, "Tools") { startCleanup() },
+            Feature("Certificates", Icons.Outlined.VerifiedUser, "Tools") { startCertificates() },
         )
         val notes = mapOf("Personal data" to "needs a jailbroken device with AFC2")
         setContent {
@@ -224,6 +229,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onDestroy() {
         unregisterReceiver(permissionReceiver)
+        profileServer?.stop()
         super.onDestroy()
     }
 
@@ -267,6 +273,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
         private var client: LockdownClient = openSession(stream)
         val deviceName: String = runCatching { client.getValue("DeviceName") as String }.getOrDefault("iPod")
         val productVersion: String? = runCatching { client.getValue("ProductVersion") as String }.getOrNull()
+
+        /** The device clock, in seconds since 1970, or null if it won't say. */
+        fun deviceTime(): Long? = runCatching { (client.getValue("TimeIntervalSince1970") as Number).toLong() }.getOrNull()
 
         init {
             val label = deviceName + (productVersion?.let { " · iOS $it" } ?: "")
@@ -3079,6 +3088,125 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 }
             }
         }
+    }
+
+    // ---------------------------------------------------------------- root certificates
+
+    private fun loadRoots(): List<RootProfile.Root> =
+        assets.list("roots").orEmpty().sorted().map { f -> RootProfile.Root(f.removeSuffix(".cer"), assets.open("roots/$f").use { it.readBytes() }) }
+
+    /**
+     * Fixes "The certificate for this server is invalid" in Safari on old iOS by installing a profile of
+     * current root certificates (see RootProfile). Checks the device clock first: a wrong date (an iPod
+     * whose battery ran flat resets to 1970) makes every certificate look not-yet-valid, with the same error.
+     */
+    private fun startCertificates() {
+        if (busy) { log("Busy, please wait for the current operation to finish."); return }
+        val connected = usbManager.deviceList.values.any { AppleUsbTransport.isApple(it) && AppleUsbTransport.findMuxInterface(it) != null }
+        if (!connected) { showCertificates(null, null, null); return }
+        withDevice { device ->
+            log("\nChecking the device clock and installed profiles…")
+            var time: Long? = null
+            var installed: Boolean? = null
+            runOnDevice(device, after = { runOnUiThread { showCertificates(device, time, installed) } }) { mux, lockdown ->
+                time = lockdown.deviceTime()
+                installed = runCatching {
+                    withService(mux, lockdown, McInstall.SERVICE) { McInstall(it).installedIdentifiers() }
+                }.getOrNull()?.contains(RootProfile.IDENTIFIER)
+            }
+        }
+    }
+
+    private fun showCertificates(device: UsbDevice?, deviceTime: Long?, installed: Boolean?) {
+        val roots = runCatching { loadRoots() }.getOrElse { log("Couldn't load the certificates: ${it.message}"); return }
+        val profile = RootProfile.build(roots)
+        val fmt = java.text.SimpleDateFormat("MMM d, yyyy h:mm a", java.util.Locale.US)
+        val now = System.currentTimeMillis() / 1000
+        val msg = buildString {
+            if (deviceTime != null) {
+                val skew = deviceTime - now
+                log("Device clock: ${fmt.format(java.util.Date(deviceTime * 1000))}")
+                if (kotlin.math.abs(skew) > 2 * 86400) {
+                    append("⚠ The device's date is ${fmt.format(java.util.Date(deviceTime * 1000))}. With a wrong date, every ")
+                    append("certificate looks invalid, whatever is installed. Fix it first in Settings › General › ")
+                    append("Date & Time (turn on Set Automatically, or set it by hand).\n\n")
+                }
+            }
+            if (installed == true) append("These certificates are already installed on the device. Installing again replaces them.\n\n")
+            append("Installs a profile with ${roots.size} current root certificates, so Safari and apps can open sites ")
+            append("that use certificate authorities newer than iOS 6 (Let's Encrypt and others):\n\n")
+            append(roots.joinToString("\n") { "• " + it.commonName })
+            append("\n\nYou'll tap Install on the device to accept it. It can be removed later in Settings › General › Profiles.")
+            if (device == null) append("\n\nNo device connected over USB, so it can only be shared over Wi-Fi.")
+        }
+        val b = MaterialAlertDialogBuilder(this)
+            .setTitle("Root certificates")
+            .setMessage(msg)
+            .setNeutralButton("Share over Wi-Fi") { _, _ -> shareProfileOverWifi(profile) }
+            .setNegativeButton("Cancel", null)
+        if (device != null) b.setPositiveButton("Install over USB") { _, _ -> installProfileOverUsb(device, profile) }
+        b.show()
+    }
+
+    private fun installProfileOverUsb(device: UsbDevice, profile: ByteArray) {
+        log("\nSending the certificate profile to the device…")
+        var failed: String? = null
+        runOnDevice(device, after = {
+            failed?.let { err ->
+                runOnUiThread {
+                    MaterialAlertDialogBuilder(this)
+                        .setTitle("Couldn't install over USB")
+                        .setMessage("$err\n\nYou can install it from Safari on the device over Wi-Fi instead.")
+                        .setPositiveButton("Share over Wi-Fi") { _, _ -> shareProfileOverWifi(profile) }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                }
+            }
+        }) { mux, lockdown ->
+            try {
+                withService(mux, lockdown, McInstall.SERVICE) { McInstall(it).installProfile(profile) }
+                log("Sent ✓ On the device, tap Install (and Install again to confirm). If no screen appears, " +
+                    "unlock it and look in Settings › General › Profiles.")
+            } catch (e: Exception) {
+                failed = e.message ?: e.toString()
+                log("Install over USB failed: $failed")
+            }
+        }
+    }
+
+    private var profileServer: ProfileServer? = null
+
+    private fun shareProfileOverWifi(profile: ByteArray) {
+        profileServer?.stop()
+        val server = ProfileServer(profile) { line -> log("  request from $line") }
+        try { server.start() } catch (e: Exception) { log("Couldn't start the Wi-Fi server: ${e.message}"); return }
+        profileServer = server
+        val addrs = ProfileServer.localAddresses()
+        if (addrs.isEmpty()) {
+            server.stop()
+            log("No Wi-Fi network found on this phone.")
+            MaterialAlertDialogBuilder(this).setTitle("No Wi-Fi").setMessage(
+                "Connect this phone and the device to the same Wi-Fi network (or turn on this phone's hotspot and " +
+                "join it from the device), then try again.").setPositiveButton("OK", null).show()
+            return
+        }
+        val urls = addrs.map { "http://$it:${server.port}/" }
+        log("\nSharing the certificate profile at ${urls.joinToString(" or ")}")
+        val text = TextView(this).apply {
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+            setTextIsSelectable(true)
+            textSize = 15f
+            text = "On the device, open Safari and go to:\n\n" + urls.joinToString("\n") +
+                "\n\nTap Install profile, then Install. Both need to be on the same Wi-Fi " +
+                "(this phone's hotspot works too). Keep this open until it's installed."
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Install over Wi-Fi")
+            .setView(text)
+            .setCancelable(false)
+            .setPositiveButton("Done") { _, _ -> server.stop(); profileServer = null; log("Stopped sharing the profile.") }
+            .show()
     }
 
     // ---------------------------------------------------------------- clean up

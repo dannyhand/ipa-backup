@@ -24,6 +24,9 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
   the Apple ID that bought them, or a jailbroken device with AppSync.
 - **Clean up:** finds and deletes leftovers from interrupted transfers: app archives, unfinished
   installs and partly uploaded files on the device, unfinished saves and temporary files on the phone
+- **Root certificates:** fixes Safari's "certificate for this server is invalid" on old iOS by installing a
+  profile of current root certificates (Let's Encrypt, Google, DigiCert, Sectigo and others), over USB or
+  from Safari over Wi-Fi. Also warns if the device's date is wrong, which causes the same error.
 - **Jailbroken devices (AFC2):** if archiving fails, the app bundle is copied straight from the filesystem.
   **Browse files** shows the whole filesystem and saves any file or folder.
 - **Non-jailbroken devices:** Browse files shows the media folder (`/var/mobile/Media`)

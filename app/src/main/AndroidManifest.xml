@@ -3,6 +3,9 @@
 
     <uses-feature android:name="android.hardware.usb.host" android:required="true" />
 
+    <!-- Only to serve the certificate profile to the device over the local Wi-Fi (Tools › Certificates). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:label="IPA Backup"
         android:icon="@drawable/ic_launcher"
