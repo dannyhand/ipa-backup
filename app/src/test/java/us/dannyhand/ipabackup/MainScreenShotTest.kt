@@ -11,6 +11,7 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Contacts
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -43,7 +44,8 @@ class MainScreenShotTest {
         Feature("Uninstall", Icons.Outlined.DeleteSweep, "Apps") {},
         Feature("Music", Icons.Outlined.LibraryMusic, "Media") {},
         Feature("Photos", Icons.Outlined.PhotoLibrary, "Media") {},
-        Feature("Other media", Icons.Outlined.Podcasts, "Media") {},
+        Feature("Synced Videos", Icons.Outlined.Movie, "Media") {},
+        Feature("Other Audio", Icons.Outlined.Podcasts, "Media") {},
         Feature("Voice Memos", Icons.Outlined.Mic, "Media") {},
         Feature("Books", Icons.Outlined.MenuBook, "Media") {},
         Feature("Messages", Icons.Outlined.Forum, "Personal data", needsJailbreak = true) {},

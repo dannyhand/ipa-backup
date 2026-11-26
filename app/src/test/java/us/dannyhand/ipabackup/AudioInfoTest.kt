@@ -88,4 +88,28 @@ class AudioInfoTest {
         assertEquals(215500L, i.durationMs); assertEquals(44100, i.sampleRate)
         assertTrue(i.cover == null)
     }
+
+    @Test fun videoWithAvcAndTvTags() {
+        fun s16(v: Int) = byteArrayOf((v shr 8).toByte(), v.toByte())
+        val mvhd = box("mvhd", ints(0, 0, 0, 600, 600 * 1320), ByteArray(80))
+        val avcC = box("avcC", byteArrayOf(1, 77, 64, 31), ByteArray(4))
+        // VisualSampleEntry: 6 reserved + 2 index, 16 predefined/reserved, width, height, then the rest of the 78 bytes
+        val avc1 = box("avc1", ByteArray(6), byteArrayOf(0, 1), ByteArray(16), s16(1280), s16(720), ByteArray(78 - 28), avcC)
+        val vtrak = box("trak", box("mdia", box("hdlr", ints(0, 0), "vide".toByteArray(L1), ByteArray(12)),
+            box("minf", box("stbl", box("stsd", ints(0, 1), avc1)))))
+        val atrak = box("trak", box("mdia", box("hdlr", ints(0, 0), "soun".toByteArray(L1), ByteArray(12)),
+            box("minf", box("stbl", box("stsd", ints(0, 1), box("mp4a", ByteArray(28)))))))
+        fun item(type: String, data: ByteArray) = box(type, box("data", ints(0, 0), data))
+        val ilst = box("ilst", item("\u00A9nam", "Pilot".toByteArray()), item("tvsh", "My Show".toByteArray()),
+            item("tvsn", ints(2)), item("tves", ints(5)), item("stik", byteArrayOf(10)))
+        val udta = box("udta", box("meta", ints(0), ilst))
+        val f = box("ftyp", "M4V ".toByteArray(L1), ints(0)) + box("moov", mvhd, atrak, vtrak, udta) + box("mdat", ByteArray(16))
+        val i = AudioInfo.read(tmp(f, "m4v"))!!
+        assertEquals(AudioInfo.Format.H264_VIDEO, i.format)
+        assertEquals(AudioInfo.Video("avc1", 1280, 720, 77, 31), i.video)
+        assertEquals("Main", i.video!!.profileName)
+        assertEquals("Pilot", i.title); assertEquals("My Show", i.show)
+        assertEquals(2, i.season); assertEquals(5, i.episode); assertEquals(10, i.stik)
+        assertEquals(1_320_000L, i.durationMs)
+    }
 }

@@ -66,6 +66,7 @@ import us.dannyhand.ipabackup.music.MusicLibrary
 import us.dannyhand.ipabackup.music.LibrarySample
 import us.dannyhand.ipabackup.music.Playlist
 import us.dannyhand.ipabackup.music.Playlists
+import us.dannyhand.ipabackup.music.SongImport
 import us.dannyhand.ipabackup.util.AudioTagger
 import us.dannyhand.ipabackup.util.ExifThumb
 import us.dannyhand.ipabackup.util.IpaInfo
@@ -139,18 +140,28 @@ import us.dannyhand.ipabackup.MainActivity.Leftover
 
 // ---------------------------------------------------------------- music browser
 
-/** Music, or (otherMedia) podcasts, audiobooks, iTunes U, synced videos and ringtones. */
-internal fun MainActivity.browseMusic(device: UsbDevice, otherMedia: Boolean) {
-    log(if (otherMedia) "\nLoading podcasts, audiobooks, videos and ringtones…" else "\nLoading the music library…")
+/** Which part of the library a browser shows: songs, synced videos, or the other audio (podcasts, audiobooks, ringtones…). */
+internal enum class MediaView(val title: String, val loading: String) {
+    MUSIC("Music", "the music library"),
+    VIDEOS("Synced Videos", "synced videos"),
+    AUDIO("Other Audio", "podcasts, audiobooks, ringtones and other audio"),
+}
+
+/** Music, synced videos (movies, TV shows, music videos), or other audio (podcasts, audiobooks, iTunes U, ringtones). */
+internal fun MainActivity.browseMusic(device: UsbDevice, view: MediaView) {
+    val otherMedia = view != MediaView.MUSIC
+    log("\nLoading ${view.loading}…")
     val cmds = LinkedBlockingQueue<MusicCmd>()
     musicSelected.clear()
     musicQuery = ""
     musicOther = otherMedia
+    musicView = view
     runOnDevice(device, after = { setStopButtonVisible(false); stopMode = StopMode.NONE }) { mux, lockdown ->
         withService(mux, lockdown, AfcClient.SERVICE) { stream ->
             val afc = AfcClient(stream)
             val library = loadMusicLibrary(afc) ?: if (otherMedia) emptyList() else return@withService
-            val tracks = if (!otherMedia) library.filter { it.kind == MusicLibrary.Kind.MUSIC } else {
+            val tracks = if (view == MediaView.MUSIC) library.filter { it.kind == MusicLibrary.Kind.MUSIC }
+                else if (view == MediaView.VIDEOS) library.filter { it.kind == MusicLibrary.Kind.VIDEO } else {
                 val tones = runCatching {
                     val files = afc.readDir(MusicLibrary.RINGTONES_DIR).mapNotNull { n ->
                         runCatching { afc.stat("${MusicLibrary.RINGTONES_DIR}/$n") }.getOrNull()?.takeIf { !it.isDir }?.let { n to it.size }
@@ -158,11 +169,11 @@ internal fun MainActivity.browseMusic(device: UsbDevice, otherMedia: Boolean) {
                     val plist = runCatching { Plist.parse(afc.readHead(MusicLibrary.RINGTONES_PLIST, 4 shl 20)) }.getOrNull()
                     MusicLibrary.ringtones(plist, files)
                 }.getOrDefault(emptyList())
-                library.filter { it.kind != MusicLibrary.Kind.MUSIC } + tones
+                library.filter { it.kind != MusicLibrary.Kind.MUSIC && it.kind != MusicLibrary.Kind.VIDEO } + tones
             }
             if (otherMedia) {
                 val counts = tracks.groupingBy { it.kind }.eachCount()
-                log(if (counts.isEmpty()) "No podcasts, audiobooks, videos or ringtones on the iPod."
+                log(if (counts.isEmpty()) "No ${view.loading} on the device."
                     else counts.entries.joinToString(", ") { (k, n) -> "$n ${k.folder.lowercase()}" } +
                         " (${humanSize(tracks.sumOf { it.size })}).")
             } else {
@@ -311,7 +322,7 @@ internal fun MainActivity.showMusic(tracks: List<MusicLibrary.Track>, cmds: Link
         addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.55).toInt()))
     }
     val dialog = MaterialAlertDialogBuilder(this)
-        .setTitle(if (musicOther) "Podcasts, Audiobooks, Video & Ringtones (${tracks.size})" else "Music (${tracks.size} songs)")
+        .setTitle(if (musicOther) "${musicView.title} (${tracks.size})" else "Music (${tracks.size} songs)")
         .setView(container)
         .setPositiveButton("Copy", null)
         .setNeutralButton("Select all", null)
@@ -505,18 +516,25 @@ internal fun MainActivity.tagsFor(t: MusicLibrary.Track) = AudioTagger.Tags(
 
 // ---------------------------------------------------------------- playlists
 
-internal fun MainActivity.showMusicMenu(device: UsbDevice?) {
-    val items = if (device != null) arrayOf("Songs", "Playlists", "Add songs…") else arrayOf("Add songs (check files without the device)…")
+internal fun MainActivity.showMusicMenu(device: UsbDevice?) = showMediaMenu(device, MediaView.MUSIC)
+
+/** The menu behind Music, Synced Videos and Other Audio: browse what's there, or add new items. */
+internal fun MainActivity.showMediaMenu(device: UsbDevice?, view: MediaView) {
+    val adds = when (view) {
+        MediaView.MUSIC -> listOf(SongImport.AddKind.MUSIC)
+        MediaView.VIDEOS -> listOf(SongImport.AddKind.MOVIE, SongImport.AddKind.TV_SHOW, SongImport.AddKind.MUSIC_VIDEO)
+        MediaView.AUDIO -> listOf(SongImport.AddKind.PODCAST, SongImport.AddKind.AUDIOBOOK, SongImport.AddKind.RINGTONE)
+    }
+    class Item(val label: String, val run: () -> Unit)
+    val items = ArrayList<Item>()
+    if (device != null) {
+        items += Item(if (view == MediaView.MUSIC) "Songs" else "Browse ${view.title.lowercase()}") { browseMusic(device, view) }
+        if (view == MediaView.MUSIC) items += Item("Playlists") { startPlaylists(device) }
+    }
+    for (k in adds) items += Item("Add ${k.plural.lowercase()}…" + if (device == null) " (check files only)" else "") { launchSongPicker(device, k) }
     MaterialAlertDialogBuilder(this)
-        .setTitle("Music")
-        .setItems(items) { _, which ->
-            when {
-                device == null -> launchSongPicker(null)
-                which == 0 -> browseMusic(device, otherMedia = false)
-                which == 1 -> startPlaylists(device)
-                else -> launchSongPicker(device)
-            }
-        }
+        .setTitle(view.title + if (device == null) " (no device connected)" else "")
+        .setItems(items.map { it.label }.toTypedArray()) { _, which -> items[which].run() }
         .setNegativeButton("Cancel", null)
         .show()
 }

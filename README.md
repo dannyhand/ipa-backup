@@ -70,8 +70,12 @@ iTunes and iBooks are trademarks of Apple Inc.
   and save originals (with their dates) to `Download/IPA Backup/Photos/`
 - **Voice Memos:** saved with their recording date and label as the file name, tagged for music players
 - **Books:** iBooks EPUBs (repackaged into valid `.epub` files) and PDFs, named `Author - Title`
-- **Other Media:** podcasts, audiobooks, iTunes U, synced videos (movies, TV, music videos) and ringtones,
-  each saved to its own folder with readable names
+- **Synced Videos:** movies, TV shows and music videos; **Other Audio:** podcasts, audiobooks, iTunes U and
+  ringtones. Each saved to its own folder with readable names
+- **Adding media (in progress):** pick songs, podcasts, audiobooks, movies, TV shows, music videos or ringtones
+  on the phone; the app reads their tags, checks the format (and for videos, whether the connected device can
+  play them), spots ones already on the device and plans where they go. Writing them into the device's
+  library is the next step
 - **Contacts, Notes, Bookmarks & Calendars** (jailbroken devices with AFC2): contacts as `.vcf`, notes as
   HTML plus a zip of text files, bookmarks and Reading List as a browser-importable HTML file, and one
   `.ics` per calendar
@@ -131,7 +135,7 @@ documentation and source. No code was copied.
 |---|---|
 | Apps (.ipa) | iOS 8 or older (Apple removed app extraction in iOS 9); jailbroken devices with AFC2 on any version |
 | Restore (install .ipa) | Any iOS version the app supports; purchased apps need their Apple ID signed in, or AppSync |
-| App data, Music, Other Media, Photos, Voice Memos, Books | Any iOS version, no jailbreak |
+| App data, Music, Synced Videos, Other Audio, Photos, Voice Memos, Books | Any iOS version, no jailbreak |
 | Contacts, Notes, Bookmarks, Calendars, Messages | Jailbreak with AFC2 ("Apple File Conduit 2" from Cydia) |
 | Files | Media folder without a jailbreak; whole filesystem with AFC2 |
 

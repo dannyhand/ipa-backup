@@ -105,6 +105,7 @@ import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Contacts
@@ -193,9 +194,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
             Feature("Back up apps", Icons.Outlined.Apps, "Apps") { withDevice(this::probe) },
             Feature("Restore", Icons.Outlined.InstallMobile, "Apps") { withDevice(this::showRestorePicker) },
             Feature("Uninstall", Icons.Outlined.DeleteSweep, "Apps") { withDevice(this::startUninstall) },
-            Feature("Music", Icons.Outlined.LibraryMusic, "Media") { startMusic() },
+            Feature("Music", Icons.Outlined.LibraryMusic, "Media") { startMedia(MediaView.MUSIC) },
             Feature("Photos", Icons.Outlined.PhotoLibrary, "Media") { withDevice(this::browsePhotos) },
-            Feature("Other media", Icons.Outlined.Podcasts, "Media") { withDevice { d -> browseMusic(d, otherMedia = true) } },
+            Feature("Synced Videos", Icons.Outlined.Movie, "Media") { startMedia(MediaView.VIDEOS) },
+            Feature("Other Audio", Icons.Outlined.Podcasts, "Media") { startMedia(MediaView.AUDIO) },
             Feature("Voice Memos", Icons.Outlined.Mic, "Media") { withDevice(this::browseVoiceMemos) },
             Feature("Books", Icons.Outlined.MenuBook, "Media") { startBooks() },
             Feature("Messages", Icons.Outlined.Forum, "Personal data", needsJailbreak = true) { withDevice(this::exportMessages) },
@@ -556,16 +558,18 @@ class MainActivity : androidx.activity.ComponentActivity() {
     /** Track pids checked in the music list; kept while the browser is open. */
     internal val musicSelected = HashSet<Long>()
     @Volatile internal var musicOther = false
+    @Volatile internal var musicView = MediaView.MUSIC
     internal var musicQuery = ""
 
     /** Add songs: the device (if any) waiting on the file picker, and the songs staged for adding. */
     internal var addSongsDevice: UsbDevice? = null
     internal var addSongsPending = false
+    internal var addKind = us.dannyhand.ipabackup.music.SongImport.AddKind.MUSIC
     internal var stagedSongs: List<StagedSong> = emptyList()
     internal val pickSongs = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (!addSongsPending) return@registerForActivityResult
         addSongsPending = false
-        if (!uris.isNullOrEmpty()) prepareSongs(addSongsDevice, uris)
+        if (!uris.isNullOrEmpty()) prepareSongs(addSongsDevice, uris, addKind)
     }
 
     // ---------------------------------------------------------------- playlists  (functions in MusicBrowser.kt)

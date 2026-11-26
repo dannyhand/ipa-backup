@@ -134,7 +134,8 @@ import us.dannyhand.ipabackup.MainActivity.NewBook
 import us.dannyhand.ipabackup.music.SongImport
 import us.dannyhand.ipabackup.util.AudioInfo
 
-// Adding songs, part 1: pick files on the phone, read and check them, and plan where they'd go.
+// Adding songs, podcasts, audiobooks, videos and ringtones, part 1: pick files on the phone, read and check them,
+// and plan where they'd go.
 // Writing them into the device's library comes once MediaLibrary.sqlitedb's layout is confirmed.
 // These are MainActivity extension functions: they run on the activity and use its state and helpers.
 
@@ -146,20 +147,22 @@ internal class StagedSong(val file: java.io.File, val candidate: SongImport.Cand
 internal fun MainActivity.isDeviceConnected() =
     usbManager.deviceList.values.any { AppleUsbTransport.isApple(it) && AppleUsbTransport.findMuxInterface(it) != null }
 
-/** Music works without a device for "Add songs" (to try picking and checking files). */
-internal fun MainActivity.startMusic() {
+/** Music, Synced Videos and Other Audio work without a device for adding (to try picking and checking files). */
+internal fun MainActivity.startMedia(view: MediaView) {
     if (busy) { log("Busy, please wait for the current operation to finish."); return }
-    if (isDeviceConnected()) withDevice { showMusicMenu(it) } else showMusicMenu(null)
+    if (isDeviceConnected()) withDevice { showMediaMenu(it, view) } else showMediaMenu(null, view)
 }
 
-internal fun MainActivity.launchSongPicker(device: UsbDevice?) {
+internal fun MainActivity.launchSongPicker(device: UsbDevice?, kind: SongImport.AddKind = SongImport.AddKind.MUSIC) {
     addSongsDevice = device
     addSongsPending = true
-    pickSongs.launch(arrayOf("audio/*", "application/octet-stream"))
+    addKind = kind
+    // .m4r and some .m4a/.m4b files are labeled "application/octet-stream" by Android's file pickers.
+    pickSongs.launch(if (kind.isVideo) arrayOf("video/*", "application/octet-stream") else arrayOf("audio/*", "application/octet-stream"))
 }
 
 /** Copies the picked files into the app cache, reads their tags and cover, then checks them against the device. */
-internal fun MainActivity.prepareSongs(device: UsbDevice?, uris: List<android.net.Uri>) {
+internal fun MainActivity.prepareSongs(device: UsbDevice?, uris: List<android.net.Uri>, kind: SongImport.AddKind = SongImport.AddKind.MUSIC) {
     val dir = java.io.File(cacheDir, "add-music").apply { deleteRecursively(); mkdirs() }
     busy = true
     log("\nReading ${uris.size} file(s)…")
@@ -177,7 +180,9 @@ internal fun MainActivity.prepareSongs(device: UsbDevice?, uris: List<android.ne
                     continue
                 }
                 val info = runCatching { AudioInfo.read(file) }.getOrNull()
-                val c = SongImport.Candidate(name, ext, if (size > 0) size else file.length(), info, SongImport.classify(ext, info))
+                val c = SongImport.Candidate(name, ext, if (size > 0) size else file.length(), info, SongImport.classify(ext, info, kind), kind)
+                // A file tagged as a different kind (e.g. an audiobook added as a podcast) is still added as chosen.
+                info?.stik?.let { s -> if (s != kind.stik && s in setOf(1, 2, 6, 9, 10, 14, 21)) c.note = "tagged as ${stikName(s)}; adding as ${kind.plural.lowercase().removeSuffix("s")}" }
                 val cover = info?.cover?.let { runCatching { coverJpeg(it, java.io.File(dir, "$i.jpg")) }.getOrNull() }
                 staged += StagedSong(file, c, cover)
             }
@@ -186,13 +191,35 @@ internal fun MainActivity.prepareSongs(device: UsbDevice?, uris: List<android.ne
         }
         if (staged.isEmpty()) { log("Nothing to add."); return@thread }
         if (device == null) {
-            log("No device connected: checked the files only (not whether they're already on the device).")
-            runOnUiThread { showSongReview(null, staged) }
+            log("No device connected: checked the files only (not whether they're already on the device" +
+                (if (kind.isVideo) " or can play them" else "") + ").")
+            runOnUiThread { showSongReview(null, staged, kind) }
             return@thread
         }
-        runOnDevice(device, after = { runOnUiThread { showSongReview(device, staged) } }) { mux, lockdown ->
+        runOnDevice(device, after = { runOnUiThread { showSongReview(device, staged, kind) } }) { mux, lockdown ->
+            if (kind.isVideo) {
+                val model = lockdown.value("ProductType", null) as? String
+                val limit = SongImport.videoLimit(model)
+                if (limit != null) for (st in staged) {
+                    val v = st.candidate.info?.video ?: continue
+                    if (!st.candidate.status.ready) continue
+                    SongImport.videoProblem(v, limit)?.let { st.candidate.status = SongImport.Status.WONT_PLAY; st.candidate.note = it }
+                }
+            }
             withService(mux, lockdown, AfcClient.SERVICE) { s ->
                 val afc = AfcClient(s)
+                if (kind == SongImport.AddKind.RINGTONE) {
+                    val tones = runCatching { afc.readDir(SongImport.RINGTONES_DIR) }.getOrDefault(emptyList()).toHashSet()
+                    val plist = runCatching { Plist.parse(afc.readHead(MusicLibrary.RINGTONES_PLIST, 4 shl 20)) }.getOrNull()
+                    val existing = MusicLibrary.ringtones(plist, tones.map { it to 0L })
+                    // Ringtones have names only, so match on those.
+                    val names = existing.map { SongImport.matchKey(it.title, "") }.toHashSet()
+                    for (st in staged) if (st.candidate.status.ready && !names.add(SongImport.matchKey(st.candidate.title, "")))
+                        st.candidate.status = SongImport.Status.DUPLICATE
+                    for (st in staged) if (st.candidate.status.ready) st.devicePath = SongImport.planRingtonePath(tones)
+                    log("Checked against ${existing.size} ringtones on the device.")
+                    return@withService
+                }
                 val library = loadMusicLibrary(afc) ?: emptyList()
                 SongImport.markDuplicates(staged.map { it.candidate }, library)
                 // Where each new file would go, avoiding names already used on the device.
@@ -218,7 +245,10 @@ internal fun coverJpeg(bytes: ByteArray, out: java.io.File): java.io.File? {
     return out
 }
 
-internal fun MainActivity.showSongReview(device: UsbDevice?, staged: List<StagedSong>) {
+/** iTunes' stik values, as words. */
+internal fun stikName(s: Int) = when (s) { 1 -> "music"; 2 -> "an audiobook"; 6 -> "a music video"; 9 -> "a movie"; 10 -> "a TV show"; 14 -> "a ringtone"; 21 -> "a podcast"; else -> "kind $s" }
+
+internal fun MainActivity.showSongReview(device: UsbDevice?, staged: List<StagedSong>, kind: SongImport.AddKind = SongImport.AddKind.MUSIC) {
     if (isFinishing) return
     val density = resources.displayMetrics.density
     val pad = (12 * density).toInt()
@@ -262,15 +292,19 @@ internal fun MainActivity.showSongReview(device: UsbDevice?, staged: List<Staged
                 ellipsize = android.text.TextUtils.TruncateAt.END
             })
             val i = c.info
+            val v = i?.video
             val detail = listOfNotNull(
+                i?.takeIf { it.season > 0 || it.episode > 0 }?.let { "S${it.season} E${it.episode}" },
                 i?.durationMs?.takeIf { it > 0 }?.let(SongImport::duration),
-                i?.format?.kind?.removeSuffix(" audio file") ?: c.ext.uppercase(),
-                i?.bitrateKbps?.takeIf { it > 0 }?.let { "$it kbps" },
+                v?.let { "${it.width}×${it.height} " + (if (it.codec.startsWith("avc")) "H.264 ${it.profileName} ${if (it.level > 0) "%.1f".format(it.level / 10.0) else ""}".trim() else it.codec) }
+                    ?: (i?.format?.kind?.removeSuffix(" audio file") ?: c.ext.uppercase()),
+                i?.bitrateKbps?.takeIf { it > 0 && v == null }?.let { "$it kbps" },
                 humanSize(c.size),
             ).joinToString(" · ")
             texts.addView(TextView(this@showSongReview).apply { text = detail; textSize = 12f; alpha = 0.75f })
             texts.addView(TextView(this@showSongReview).apply {
-                text = (if (c.status.ready && c.status != SongImport.Status.DRM) "✓ " else "⚠ ") + c.status.label
+                text = (if (c.status.ready && c.status != SongImport.Status.DRM) "✓ " else "⚠ ") + c.status.label +
+                    (c.note?.let { "\n$it" } ?: "")
                 textSize = 12f
                 setTextColor(when {
                     c.status == SongImport.Status.READY -> 0xFF2E7D32.toInt()
@@ -287,7 +321,7 @@ internal fun MainActivity.showSongReview(device: UsbDevice?, staged: List<Staged
         textSize = 13f
         text = "$ready ready" + (if (dupes > 0) ", $dupes already on the device" else "") +
             (if (bad > 0) ", $bad can't be added" else "") +
-            if (device == null) "\n(No device connected, so not checked against its library.)" else ""
+            if (device == null) "\n(No device connected, so not checked against what's on it" + (if (kind.isVideo) " or what it can play" else "") + ".)" else ""
     }
     val body = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
@@ -298,13 +332,16 @@ internal fun MainActivity.showSongReview(device: UsbDevice?, staged: List<Staged
     for (st in staged) st.devicePath?.let { log("  ${st.candidate.title} → $it") }
     stagedSongs = staged
     MaterialAlertDialogBuilder(this)
-        .setTitle("Add songs")
+        .setTitle("Add ${kind.plural.lowercase()}")
         .setView(body)
         .setPositiveButton("Add to device") { _, _ ->
             MaterialAlertDialogBuilder(this)
                 .setTitle("Almost there")
-                .setMessage("Picking, reading and checking songs is done. The last step, writing them into the Music " +
-                    "app's library, comes next, once your library sample confirms how iOS 6 stores songs.")
+                .setMessage(if (kind == SongImport.AddKind.RINGTONE)
+                    "Picking and checking ringtones is done. The last step, adding them to the device's ringtone list, comes " +
+                        "next, once the Ringtones.plist from your library sample confirms its format."
+                    else "Picking, reading and checking is done. The last step, writing them into the device's library, comes " +
+                        "next, once your library sample confirms how iOS 6 stores ${kind.plural.lowercase()}.")
                 .setPositiveButton("OK", null)
                 .show()
         }

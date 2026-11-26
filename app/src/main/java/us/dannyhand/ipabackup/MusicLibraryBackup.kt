@@ -233,7 +233,14 @@ internal fun MainActivity.exportLibrarySample(device: UsbDevice) {
             } finally {
                 file.parentFile?.deleteRecursively()
             }
-            log("Saved ${t.location} ✓ Send me this file.")
+            log("Saved ${t.location} ✓")
+            // The ringtone list too (a small plist), for adding ringtones.
+            val afc = AfcClient(s)
+            runCatching { java.io.ByteArrayOutputStream().also { afc.copyFile(MusicLibrary.RINGTONES_PLIST, it) }.toByteArray() }.getOrNull()?.let { tones ->
+                runCatching { saveBytes(IpaSaver.clean("Ringtones (${lockdown.deviceName}) ${today()}") + ".plist", MUSICLIB_SUBFOLDER, tones) }
+                    .onSuccess { log("Saved $it ✓") }
+            } ?: log("(no Ringtones.plist on the device)")
+            log("Send me the file(s) above.")
         }
     }
 }

@@ -22,8 +22,8 @@ android {
         applicationId = "us.dannyhand.ipabackup"
         minSdk = 24
         targetSdk = 35
-        versionCode = 41
-        versionName = "2.8"
+        versionCode = 42
+        versionName = "2.9"
     }
     signingConfigs {
         if (releaseStoreFile != null) {

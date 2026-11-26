@@ -12,9 +12,10 @@ import java.nio.ByteOrder
  * Xing/Info or VBRI header that encoders put in the first frame (exact for VBR files), otherwise
  * estimated from the first frame's bitrate (exact for constant-bitrate files).
  *
- * M4A/MP4: tags from moov/udta/meta/ilst (©nam, ©ART, ©alb, aART, ©wrt, ©gen, ©day, trkn, disk, covr),
- * duration from mvhd, codec from the sound track's stsd entry (mp4a = AAC, alac = Apple Lossless;
- * drms = iTunes Store DRM, which other devices can't play).
+ * M4A/MP4/M4V/MOV: tags from moov/udta/meta/ilst (©nam, ©ART, ©alb, aART, ©wrt, ©gen, ©day, trkn, disk,
+ * covr, plus iTunes' stik media kind and the TV tags tvsh/tvsn/tves), duration from mvhd, codecs from
+ * the tracks' stsd entries (mp4a = AAC, alac = Apple Lossless, drms = iTunes Store DRM; avc1 = H.264,
+ * mp4v = MPEG-4 video), and for H.264 the profile and level from its avcC box.
  */
 object AudioInfo {
     enum class Format(val kind: String, val ext: String) {
@@ -22,6 +23,20 @@ object AudioInfo {
         AAC("AAC audio file", "m4a"),
         ALAC("Apple Lossless audio file", "m4a"),
         PROTECTED_AAC("Protected AAC audio file", "m4p"),
+        H264_VIDEO("MPEG-4 video file", "m4v"),
+        MPEG4_VIDEO("MPEG-4 video file", "m4v"),
+        OTHER_VIDEO("Video file", "mp4"),
+        PROTECTED_VIDEO("Protected MPEG-4 video file", "m4v"),
+        ;
+        val isVideo get() = this == H264_VIDEO || this == MPEG4_VIDEO || this == OTHER_VIDEO || this == PROTECTED_VIDEO
+    }
+
+    /**
+     * A video track: codec (avc1, mp4v…), size, and for H.264 the profile (66 Baseline, 77 Main,
+     * 100 High) and level ×10 (31 = 3.1).
+     */
+    data class Video(val codec: String, val width: Int, val height: Int, val profile: Int = 0, val level: Int = 0) {
+        val profileName get() = when (profile) { 66 -> "Baseline"; 77 -> "Main"; 88 -> "Extended"; 100 -> "High"; 0 -> ""; else -> "profile $profile" }
     }
 
     data class Info(
@@ -41,6 +56,12 @@ object AudioInfo {
         val bitrateKbps: Int,
         val sampleRate: Int,
         val cover: ByteArray?,
+        /** iTunes media kind (stik): 1 music, 2 audiobook, 6 music video, 9 movie, 10 TV show, 14 ringtone, 21 podcast. */
+        val stik: Int? = null,
+        val show: String? = null,
+        val season: Int = 0,
+        val episode: Int = 0,
+        val video: Video? = null,
     )
 
     /** Null if the file isn't an MP3 or M4A/MP4 audio file. */
@@ -111,25 +132,45 @@ object AudioInfo {
                 }
             }
 
-            // The sound track's sample description says the codec.
+            // The tracks' sample descriptions say the codecs.
             var codec: String? = null
             var sampleRate = 0
+            var video: Video? = null
             for (trak in children(b, root.body, root.end).filter { it.type == "trak" }) {
                 val mdia = find(b, trak, "mdia") ?: continue
                 val hdlr = find(b, mdia, "hdlr") ?: continue
-                if (String(b, hdlr.body + 8, 4, Charsets.ISO_8859_1) != "soun") continue
+                val handler = String(b, hdlr.body + 8, 4, Charsets.ISO_8859_1)
                 val stsd = find(b, mdia, "minf")?.let { find(b, it, "stbl") }?.let { find(b, it, "stsd") } ?: continue
                 val entry = children(b, stsd.body + 8, stsd.end).firstOrNull() ?: continue
-                codec = entry.type
-                // AudioSampleEntry: 8 reserved/index, 8 reserved, 2 channels, 2 size, 4 reserved, 4 rate (16.16)
-                if (entry.body + 28 <= entry.end) sampleRate = (ByteBuffer.wrap(b).getInt(entry.body + 24) ushr 16)
-                break
+                if (handler == "soun" && codec == null) {
+                    codec = entry.type
+                    // AudioSampleEntry: 8 reserved/index, 8 reserved, 2 channels, 2 size, 4 reserved, 4 rate (16.16)
+                    if (entry.body + 28 <= entry.end) sampleRate = (ByteBuffer.wrap(b).getInt(entry.body + 24) ushr 16)
+                } else if (handler == "vide" && video == null && entry.body + 28 <= entry.end) {
+                    // VisualSampleEntry: 8 reserved/index, 16 predefined/reserved, then 2 width, 2 height, … 78 bytes in all
+                    val bb = ByteBuffer.wrap(b)
+                    val w = bb.getShort(entry.body + 24).toInt() and 0xFFFF
+                    val h = bb.getShort(entry.body + 26).toInt() and 0xFFFF
+                    var profile = 0
+                    var level = 0
+                    if (entry.body + 78 <= entry.end) children(b, entry.body + 78, entry.end).firstOrNull { it.type == "avcC" }?.let { c ->
+                        if (c.body + 4 <= c.end) { profile = b[c.body + 1].toInt() and 0xFF; level = b[c.body + 3].toInt() and 0xFF }
+                    }
+                    // drmi = protected video (iTunes Store); the real codec is inside, but it won't play elsewhere anyway.
+                    video = Video(entry.type, w, h, profile, level)
+                }
             }
-            val format = when (codec) {
-                null, "mp4a" -> Format.AAC
-                "alac" -> Format.ALAC
-                "drms" -> Format.PROTECTED_AAC
-                else -> return null // video or something else
+            val format = when {
+                video != null -> when (video.codec) {
+                    "avc1", "avc3" -> Format.H264_VIDEO
+                    "mp4v" -> Format.MPEG4_VIDEO
+                    "drmi" -> Format.PROTECTED_VIDEO
+                    else -> Format.OTHER_VIDEO
+                }
+                codec == null || codec == "mp4a" -> Format.AAC
+                codec == "alac" -> Format.ALAC
+                codec == "drms" -> Format.PROTECTED_AAC
+                else -> return null
             }
 
             val tags = HashMap<String, ByteArray>()
@@ -165,6 +206,11 @@ object AudioInfo {
                 bitrateKbps = if (durationMs > 0) (sizeBits / durationMs).toInt() else 0,
                 sampleRate = sampleRate,
                 cover = tags["covr"],
+                stik = tags["stik"]?.takeIf { it.isNotEmpty() }?.let { it[0].toInt() and 0xFF },
+                show = text("tvsh"),
+                season = tags["tvsn"]?.takeIf { it.size >= 4 }?.let { ByteBuffer.wrap(it).int } ?: 0,
+                episode = tags["tves"]?.takeIf { it.size >= 4 }?.let { ByteBuffer.wrap(it).int } ?: 0,
+                video = video,
             )
         }
     }
