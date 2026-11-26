@@ -6,6 +6,14 @@ section below for which iOS versions are supported.
 
 Built to rescue App Store games that are long gone from the store, from an iPod Touch 4th gen on iOS 6.1.6.
 
+## Screenshots
+
+<p>
+  <img src="docs/screenshots/main.png" alt="Main screen" width="260">
+  <img src="docs/screenshots/backup-running.png" alt="Backing up apps, with progress and Stop" width="260">
+  <img src="docs/screenshots/dark-mode.png" alt="Dark mode" width="260">
+</p>
+
 ## Features
 
 - **Back up apps as `.ipa` files** to `Download/IPA Backup/`, one at a time or all at once
