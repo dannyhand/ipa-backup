@@ -106,6 +106,7 @@ import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Contacts
@@ -208,6 +209,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             Feature("Home screen", Icons.Outlined.Dashboard, "Device") { withDevice(this::showHomeScreen) },
             Feature("System log", Icons.Outlined.Terminal, "Device") { withDevice(this::showSyslog) },
             Feature("Crash reports", Icons.Outlined.BugReport, "Device") { withDevice(this::browseCrashReports) },
+            Feature("Full backup", Icons.Outlined.Backup, "Device") { withDevice(this::startFullBackup) },
             Feature("Files", Icons.Outlined.FolderOpen, "Tools") { withDevice(this::browseFiles) },
             Feature("Music library", Icons.Outlined.Storage, "Tools") { withDevice(this::startMusicLibraryBackup) },
             Feature("Clean up", Icons.Outlined.CleaningServices, "Tools") { startCleanup() },
@@ -562,6 +564,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
     internal var musicQuery = ""
 
     /** Add songs: the device (if any) waiting on the file picker, and the songs staged for adding. */
+    /** Storage permission for full backups on Android 10 and older. */
+    internal val requestStorage = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { ok ->
+        if (!ok) log("Storage permission denied; full backups need it.")
+    }
+
     internal var addSongsDevice: UsbDevice? = null
     internal var addSongsPending = false
     internal var addKind = us.dannyhand.ipabackup.music.SongImport.AddKind.MUSIC

@@ -12,6 +12,7 @@ import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Contacts
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -56,6 +57,7 @@ class MainScreenShotTest {
         Feature("Home screen", Icons.Outlined.Dashboard, "Device") {},
         Feature("System log", Icons.Outlined.Terminal, "Device") {},
         Feature("Crash reports", Icons.Outlined.BugReport, "Device") {},
+        Feature("Full backup", Icons.Outlined.Backup, "Device") {},
         Feature("Files", Icons.Outlined.FolderOpen, "Tools") {},
         Feature("Music library", Icons.Outlined.Storage, "Tools") {},
         Feature("Clean up", Icons.Outlined.CleaningServices, "Tools") {},

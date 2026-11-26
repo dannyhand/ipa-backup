@@ -41,6 +41,10 @@ iTunes and iBooks are trademarks of Apple Inc.
 - **Save the activity log** to Download/IPA Backup/Logs
 - **Uninstall apps**, with a warning for any that aren't backed up
 - **Auto-backup:** optionally backs up new or updated apps as soon as the device is plugged in
+- **Full backup:** an iTunes-style backup (settings, app data, Camera Roll, messages, contacts and more) using
+  the same service iTunes uses, saved as a normal backup folder in `Download/IPA Backup/Backups/<UDID>` that
+  iTunes or iMazing on a computer can restore. Later backups only copy what changed. Needs Android's
+  "All files access" permission, because the device renames and deletes files in that folder as it works
 - **Device info:** model, iOS, serial, storage, battery charge and health (cycle count and capacity where
   iOS reports them), jailbreak status, saved as text
 - **Power:** restart, shut down or sleep the device

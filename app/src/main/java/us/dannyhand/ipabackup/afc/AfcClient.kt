@@ -35,6 +35,10 @@ class AfcClient(private val conn: ByteConnection) {
         const val OP_MAKE_DIR = 0x09L
         const val OP_FILE_WRITE = 0x10L
         const val OP_RENAME_PATH = 0x18L
+        const val OP_FILE_LOCK = 0x1BL
+        /** flock() operations, always non-blocking (LOCK_NB = 4) so a busy lock fails instead of hanging. */
+        const val LOCK_EX = 2L or 4L
+        const val LOCK_UN = 8L or 4L
 
         const val MODE_RDONLY = 1L
         /** "w": write-only, create, truncate. */
@@ -126,6 +130,12 @@ class AfcClient(private val conn: ByteConnection) {
         send(OP_FILE_READ, longs(handle, length.toLong()))
         val (op, data) = receive()
         return if (op == OP_DATA) data else ByteArray(0)
+    }
+
+    /** flock() on an open file: [op] is LOCK_EX or LOCK_UN. Throws AfcException if someone else holds it. */
+    fun lock(handle: Long, op: Long) {
+        send(OP_FILE_LOCK, longs(handle, op))
+        receive()
     }
 
     fun close(handle: Long) {
