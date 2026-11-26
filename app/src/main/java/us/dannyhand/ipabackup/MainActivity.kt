@@ -63,6 +63,7 @@ import us.dannyhand.ipabackup.music.AndroidSqlDb
 import us.dannyhand.ipabackup.music.ITunesDb
 import us.dannyhand.ipabackup.music.ItlpLibrary
 import us.dannyhand.ipabackup.music.MusicLibrary
+import us.dannyhand.ipabackup.music.LibrarySample
 import us.dannyhand.ipabackup.util.AudioTagger
 import us.dannyhand.ipabackup.util.ExifThumb
 import us.dannyhand.ipabackup.util.IpaInfo
@@ -3909,6 +3910,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 textSize = 14f
             })
             addView(art)
+            if (found.any { it.startsWith("MediaLibrary") }) addView(com.google.android.material.button.MaterialButton(
+                this@MainActivity, null, com.google.android.material.R.attr.borderlessButtonStyle).apply {
+                text = "Export a small sample (for development)"
+                setOnClickListener { exportLibrarySample(device) }
+            })
         }
         MaterialAlertDialogBuilder(this)
             .setTitle("Music library")
@@ -3923,6 +3929,34 @@ class MainActivity : androidx.activity.ComponentActivity() {
             .setNeutralButton("Restore…") { _, _ -> pendingLibDevice = device; pickLibZip.launch(arrayOf("application/zip", "*/*")) }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    /**
+     * Saves a compact SQL sample of MediaLibrary.sqlitedb (schema, small tables, ~25 songs' rows) for
+     * working out how to add songs; the full database is too big to pass around.
+     */
+    private fun exportLibrarySample(device: UsbDevice) {
+        log("\nExporting a music library sample…")
+        runOnDevice(device) { mux, lockdown ->
+            withService(mux, lockdown, AfcClient.SERVICE) { s ->
+                val file = copySqlite(AfcClient(s), "$LIB_DIR/MediaLibrary.sqlitedb", "libsample") ?: throw IOException("Can't read MediaLibrary.sqlitedb")
+                val t = IpaSaver(this).create(IpaSaver.clean("Library sample (${lockdown.deviceName}) ${today()}") + ".sql.gz", MUSICLIB_SUBFOLDER)
+                try {
+                    val gz = java.util.zip.GZIPOutputStream(t.stream)
+                    val w = gz.bufferedWriter()
+                    withSqlite(file) { LibrarySample.write(it, w) }
+                    w.flush()
+                    gz.finish()
+                    t.commit()
+                } catch (e: Exception) {
+                    t.discard()
+                    throw e
+                } finally {
+                    file.parentFile?.deleteRecursively()
+                }
+                log("Saved ${t.location} ✓ Send me this file.")
+            }
+        }
     }
 
     /** Zips the library folder (and artwork) to the phone. Returns where it was saved. */

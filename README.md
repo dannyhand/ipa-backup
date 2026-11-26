@@ -6,6 +6,18 @@ section below for which iOS versions are supported.
 
 Built to rescue App Store games that are long gone from the store, from an iPod Touch 4th gen on iOS 6.1.6.
 
+## Disclaimer
+
+**Use at your own risk.** This software is provided "as is", without warranty of any kind, express or
+implied. It talks to your device using undocumented Apple protocols and can write to, rename and delete
+files on it, including system and media library files. Anything can go wrong: lost or corrupted data, apps
+or music that stop working, a device that needs restoring. The authors and contributors are not responsible
+or liable for any damage, data loss or other harm that results from using it. Keep your own backups.
+See [LICENSE](LICENSE) for the full terms.
+
+This project is not affiliated with, endorsed by or supported by Apple Inc. iPod, iPhone, iPad, iOS,
+iTunes and iBooks are trademarks of Apple Inc.
+
 ## Screenshots
 
 <p>
@@ -133,4 +145,4 @@ Pushing a tag like `v1.0` builds a signed APK and publishes it on the Releases p
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE), which also includes the no-warranty terms.
