@@ -34,6 +34,7 @@ class AfcClient(private val conn: ByteConnection) {
         const val OP_REMOVE_PATH = 0x08L
         const val OP_MAKE_DIR = 0x09L
         const val OP_FILE_WRITE = 0x10L
+        const val OP_RENAME_PATH = 0x18L
 
         const val MODE_RDONLY = 1L
         /** "w": write-only, create, truncate. */
@@ -135,6 +136,12 @@ class AfcClient(private val conn: ByteConnection) {
     /** Creates a directory (and, like mkdir -p, its parents). Succeeds if it already exists. */
     fun makeDir(path: String) {
         send(OP_MAKE_DIR, cstr(path))
+        receive()
+    }
+
+    /** Renames or moves a file or folder (both paths on the same device). */
+    fun rename(from: String, to: String) {
+        send(OP_RENAME_PATH, cstr(from) + cstr(to))
         receive()
     }
 

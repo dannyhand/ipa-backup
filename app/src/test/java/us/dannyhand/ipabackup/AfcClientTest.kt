@@ -77,6 +77,12 @@ class FakeAfcDevice(initial: Map<String, ByteArray>) : ByteConnection {
                 for (part in path(0).trim('/').split('/')) { d += "/$part"; dirs += d } // mkdir -p
                 status(0)
             }
+            AfcClient.OP_RENAME_PATH -> {
+                val parts = String(params, 0, params.size - 1).split('\u0000')
+                val from = parts[0].trimEnd('/'); val to = parts[1].trimEnd('/')
+                val bytes = files.remove(from)
+                if (bytes == null) status(8) else { files[to] = bytes; status(0) }
+            }
             AfcClient.OP_REMOVE_PATH -> {
                 val target = path(0).trimEnd('/')
                 when {
@@ -290,5 +296,57 @@ class AfcRemoveTreeTest {
         assertEquals(setOf("/ApplicationArchives/com.x.zip"), device.files.keys)
         assertTrue("/PublicStaging/game.ipa" !in device.dirs) // folder itself removed
         assertTrue("/PublicStaging" in device.dirs)           // parent kept
+    }
+}
+
+class AfcSafeRestoreTest {
+    private fun zip(vararg entries: Pair<String, String>): ByteArray {
+        val bos = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(bos).use { z ->
+            for ((n, t) in entries) { z.putNextEntry(java.util.zip.ZipEntry(n)); z.write(t.toByteArray()); z.closeEntry() }
+        }
+        return bos.toByteArray()
+    }
+
+    @Test
+    fun swapsFilesKeepingBackups() {
+        val device = FakeAfcDevice(mapOf(
+            "/iTunes_Control/iTunes/MediaLibrary.sqlitedb" to "current".toByteArray(),
+            "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal" to "current wal".toByteArray(),
+            "/iTunes_Control/iTunes/MediaLibrary.sqlitedb.backup" to "older".toByteArray(),
+        ))
+        val r = us.dannyhand.ipabackup.afc.AfcSafeRestore.restore(
+            AfcClient(device),
+            zip("README.txt" to "x", "iTunes_Control/iTunes/MediaLibrary.sqlitedb" to "restored", "iTunes_Control/iTunes/Play Counts" to "pc").inputStream(),
+            allowedTop = setOf("iTunes_Control"),
+            retire = listOf("/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal"),
+        ).let { it.files to it.replaced }
+        assertEquals(2 to 1, r)
+        val f = device.files.mapValues { String(it.value) }
+        assertEquals("restored", f["/iTunes_Control/iTunes/MediaLibrary.sqlitedb"])
+        assertEquals("current", f["/iTunes_Control/iTunes/MediaLibrary.sqlitedb.backup"])   // old .backup replaced
+        assertEquals("current wal", f["/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal.backup"]) // stale WAL moved aside
+        assertEquals("pc", f["/iTunes_Control/iTunes/Play Counts"])
+        assertTrue(f.keys.none { it.endsWith(".ipabackup-new") || it.startsWith("/README") })
+        assertTrue("/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal" !in f)
+    }
+
+    @Test
+    fun interruptedCopyLeavesLibraryUntouched() {
+        val device = FakeAfcDevice(mapOf("/iTunes_Control/iTunes/MediaLibrary.sqlitedb" to "current".toByteArray()))
+        val noise = java.util.Random(1).let { r -> String(CharArray(20000) { ('a' + r.nextInt(26)) }) } // doesn't compress
+        val good = zip("iTunes_Control/iTunes/MediaLibrary.sqlitedb" to "restored", "iTunes_Control/iTunes/Other" to noise)
+        // The connection dies partway through the second file (like the cable coming out mid-copy).
+        val dying = object : java.io.FilterInputStream(good.inputStream()) {
+            var n = 0
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                if (n > good.size / 2) throw java.io.IOException("cable out")
+                return super.read(b, off, minOf(len, 512)).also { if (it > 0) n += it }
+            }
+        }
+        val thrown = runCatching { us.dannyhand.ipabackup.afc.AfcSafeRestore.restore(AfcClient(device), dying, setOf("iTunes_Control")) }
+        assertTrue(thrown.isFailure)
+        assertEquals("current", String(device.files.getValue("/iTunes_Control/iTunes/MediaLibrary.sqlitedb")))
+        assertTrue(device.files.keys.none { it.endsWith(".ipabackup-new") || it.endsWith(".backup") })
     }
 }

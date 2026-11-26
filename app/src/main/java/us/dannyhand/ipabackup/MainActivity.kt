@@ -44,6 +44,7 @@ import us.dannyhand.ipabackup.certs.FileServer
 import us.dannyhand.ipabackup.media.BookImport
 import us.dannyhand.ipabackup.springboard.NotificationProxy
 import us.dannyhand.ipabackup.afc.unzipInto
+import us.dannyhand.ipabackup.afc.AfcSafeRestore
 import us.dannyhand.ipabackup.certs.RootProfile
 import us.dannyhand.ipabackup.afc.AfcZipper
 import us.dannyhand.ipabackup.afc.CancelledException
@@ -101,6 +102,7 @@ import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Contacts
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -161,6 +163,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
         const val PERSONAL_SUBFOLDER = "Personal"
         const val CRASH_SUBFOLDER = "Crash Reports"
         const val LOGS_SUBFOLDER = "Logs"
+        const val MUSICLIB_SUBFOLDER = "Music Library Backups"
+        const val LIB_DIR = "/iTunes_Control/iTunes"
+        const val ART_DIR = "/iTunes_Control/Artwork"
         /** Name of a book copied in by Books › Add (a 16-hex-digit Persistent ID). */
         private val BOOK_COPY = Regex("^[0-9A-F]{16}\\.(epub|pdf)$")
         const val THUMB_PX = 200
@@ -223,6 +228,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             Feature("System log", Icons.Outlined.Terminal, "Device") { withDevice(::showSyslog) },
             Feature("Crash reports", Icons.Outlined.BugReport, "Device") { withDevice(::browseCrashReports) },
             Feature("Files", Icons.Outlined.FolderOpen, "Tools") { withDevice(::browseFiles) },
+            Feature("Music library", Icons.Outlined.Storage, "Tools") { withDevice(::startMusicLibraryBackup) },
             Feature("Clean up", Icons.Outlined.CleaningServices, "Tools") { startCleanup() },
             Feature("Certificates", Icons.Outlined.VerifiedUser, "Tools") { startCertificates() },
         )
@@ -3851,6 +3857,168 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
+    // ---------------------------------------------------------------- music library database backup
+
+    /**
+     * Backs up the music library database (not the songs) before anything edits it. Which files exist
+     * depends on the iOS version, all inside /iTunes_Control/iTunes:
+     *  - iPhone OS 1–2: iTunesDB / iTunesCDB (binary; CDB is zlib-compressed)
+     *  - iPhone OS 3–4: iTunes Library.itlp (a folder of SQLite files)
+     *  - iOS 5 and later: MediaLibrary.sqlitedb, with its -wal and -shm files (SQLite's write-ahead log:
+     *    recent changes may only be in the -wal file, so the three must be copied and restored together)
+     * The whole folder is zipped, so whichever format is there (plus play counts and iTunes' prefs) is kept.
+     * Artwork (/iTunes_Control/Artwork, the cover thumbnails) is optional because it can be large.
+     */
+    private fun startMusicLibraryBackup(device: UsbDevice) {
+        log("\nLooking at the music library database…")
+        var found = emptyList<String>()
+        var libSize = 0L
+        var artSize = 0L
+        var ok = false
+        runOnDevice(device, after = { if (ok) runOnUiThread { showMusicLibraryDialog(device, found, libSize, artSize) } }) { mux, lockdown ->
+            withService(mux, lockdown, AfcClient.SERVICE) { s ->
+                val afc = AfcClient(s)
+                val names = runCatching { afc.readDir(LIB_DIR) }.getOrDefault(emptyList()).toSet()
+                found = buildList {
+                    if ("MediaLibrary.sqlitedb" in names) add("MediaLibrary.sqlitedb (iOS 5 and later)")
+                    if ("iTunes Library.itlp" in names) add("iTunes Library.itlp (iPhone OS 3–4)")
+                    if ("iTunesCDB" in names) add("iTunesCDB (iPhone OS 1–2)")
+                    if ("iTunesDB" in names) add("iTunesDB (iPhone OS 1–2)")
+                }
+                libSize = runCatching { afc.measureTree(LIB_DIR).bytes }.getOrDefault(0L)
+                artSize = runCatching { afc.measureTree(ART_DIR).bytes }.getOrDefault(0L)
+                ok = true
+            }
+        }
+    }
+
+    private fun showMusicLibraryDialog(device: UsbDevice, found: List<String>, libSize: Long, artSize: Long) {
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val art = MaterialCheckBox(this).apply {
+            text = "Include artwork (${humanSize(artSize)})"
+            isChecked = prefs.getBoolean("musiclib_artwork", true)
+            isEnabled = artSize > 0
+        }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(TextView(this@MainActivity).apply {
+                text = (if (found.isEmpty()) "No music library database found." else "Found:\n" + found.joinToString("\n") { "• $it" }) +
+                    "\n\nLibrary folder: ${humanSize(libSize)}. Only the database is saved, not the songs themselves." +
+                    "\n\nSaved to Download/IPA Backup/$MUSICLIB_SUBFOLDER."
+                textSize = 14f
+            })
+            addView(art)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Music library")
+            .setView(body)
+            .setPositiveButton("Back up") { _, _ ->
+                prefs.edit().putBoolean("musiclib_artwork", art.isChecked).apply()
+                log("\nBacking up the music library database…")
+                runOnDevice(device) { mux, lockdown ->
+                    withService(mux, lockdown, AfcClient.SERVICE) { s -> zipMusicLibrary(AfcClient(s), lockdown.deviceName, art.isChecked, "") }
+                }
+            }
+            .setNeutralButton("Restore…") { _, _ -> pendingLibDevice = device; pickLibZip.launch(arrayOf("application/zip", "*/*")) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Zips the library folder (and artwork) to the phone. Returns where it was saved. */
+    private fun zipMusicLibrary(afc: AfcClient, owner: String, artwork: Boolean, label: String): String {
+        val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH.mm.ss", java.util.Locale.US).format(java.util.Date())
+        val t = IpaSaver(this).create(IpaSaver.clean("Music Library$label ($owner) $stamp") + ".zip", MUSICLIB_SUBFOLDER)
+        try {
+            val zos = java.util.zip.ZipOutputStream(java.io.BufferedOutputStream(t.stream, 1 shl 16))
+            val z = AfcZipper(afc, zos)
+            z.addStoredBytes(("Music library database backup made by IPA Backup on $stamp from $owner.\n" +
+                "iTunes_Control/iTunes holds the library database; iTunes_Control/Artwork the cover art.\n" +
+                "The songs themselves (iTunes_Control/Music) are not included.\n" +
+                "Restore it with Tools › Music library › Restore.\n").toByteArray(), "README.txt")
+            z.addTree(LIB_DIR, LIB_DIR.trimStart('/') + "/")
+            if (artwork && runCatching { afc.stat(ART_DIR) }.isSuccess) z.addTree(ART_DIR, ART_DIR.trimStart('/') + "/")
+            zos.finish()
+            zos.flush()
+            t.commit()
+            log("Saved ${t.location} (${z.files} files, ${humanSize(z.bytes)}) ✓")
+            return t.location
+        } catch (e: Exception) {
+            t.discard()
+            throw e
+        }
+    }
+
+    private var pendingLibDevice: UsbDevice? = null
+    private val pickLibZip = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        val device = pendingLibDevice ?: return@registerForActivityResult
+        pendingLibDevice = null
+        if (uri != null) confirmMusicLibraryRestore(device, uri)
+    }
+
+    private fun confirmMusicLibraryRestore(device: UsbDevice, uri: android.net.Uri) {
+        val names = runCatching {
+            contentResolver.openInputStream(uri)!!.use { java.util.zip.ZipInputStream(it).use { z ->
+                generateSequence { z.nextEntry }.filter { !it.isDirectory }.map { it.name }.toList()
+            } }
+        }.getOrDefault(emptyList())
+        val libFiles = names.filter { it.startsWith(LIB_DIR.trimStart('/') + "/") }
+        if (libFiles.isEmpty()) {
+            log("That zip isn't a music library backup (no iTunes_Control/iTunes inside).")
+            return
+        }
+        val restart = MaterialCheckBox(this).apply { text = "Restart the device afterwards (recommended)"; isChecked = true }
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(TextView(this@MainActivity).apply {
+                textSize = 14f
+                text = "Puts back the library database from this backup (${libFiles.size} files" +
+                    (if (names.any { it.startsWith(ART_DIR.trimStart('/') + "/") }) ", with artwork" else "") + ").\n\n" +
+                    "Songs added since the backup will be missing from the Music app (their files stay on the device), " +
+                    "and play counts go back to the backup's.\n\nThe current library is backed up first, so this can be undone. " +
+                    "Close the Music app before restoring."
+            })
+            addView(restart)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Restore music library?")
+            .setView(body)
+            .setPositiveButton("Restore") { _, _ -> runMusicLibraryRestore(device, uri, names, restart.isChecked) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun runMusicLibraryRestore(device: UsbDevice, uri: android.net.Uri, zipNames: List<String>, restart: Boolean) {
+        log("\nRestoring the music library database…")
+        runOnDevice(device) { mux, lockdown ->
+            withService(mux, lockdown, AfcClient.SERVICE) { s ->
+                val afc = AfcClient(s)
+                log("Backing up the current library first…")
+                zipMusicLibrary(afc, lockdown.deviceName, artwork = zipNames.any { it.startsWith(ART_DIR.trimStart('/') + "/") }, label = " (before restore)")
+                // SQLite side files that aren't in the backup belong to the current database: left in place they'd be
+                // replayed onto the restored one and corrupt it, so they're moved aside (to .backup) too.
+                val inZip = zipNames.map { "/$it" }.toSet()
+                val stale = listOf(LIB_DIR, "$LIB_DIR/iTunes Library.itlp").flatMap { dir ->
+                    runCatching { afc.readDir(dir) }.getOrDefault(emptyList())
+                        .filter { it.endsWith("-wal") || it.endsWith("-shm") || it.endsWith("-journal") }
+                        .map { "$dir/$it" }.filter { it !in inZip }
+                }
+                log("Copying the backup to the device under temporary names…")
+                val r = contentResolver.openInputStream(uri)!!.use {
+                    AfcSafeRestore.restore(afc, it, allowedTop = setOf("iTunes_Control"), retire = stale)
+                }
+                log("Restored ${r.files} files ✓ (${r.replaced} replaced; the previous versions are kept on the device as .backup files)")
+            }
+            if (restart) {
+                runCatching { withService(mux, lockdown, DiagnosticsRelay.SERVICE) { DiagnosticsRelay(it).restart() } }
+                    .onSuccess { log("Restarting the device so the Music app reloads the library.") }
+                    .onFailure { log("Couldn't restart (${it.message}); restart the device yourself before opening Music.") }
+            } else log("Restart the device before opening the Music app.")
+        }
+    }
+
     // ---------------------------------------------------------------- clean up
 
     /** A leftover on the device: name and size. */
@@ -3897,6 +4065,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     }.getOrNull()
                     if (listed != null) orphanBooks = scan("/Books") { it.matches(BOOK_COPY) && it !in listed }
                         .map { Leftover("../Books/" + it.name, it.size) }
+                    // Library files from a music library restore that was cut off before the swap.
+                    orphanBooks = orphanBooks + listOf(LIB_DIR, "$LIB_DIR/iTunes Library.itlp", "$ART_DIR").flatMap { dir ->
+                        scan(dir) { it.endsWith(AfcSafeRestore.NEW_SUFFIX) }.map { Leftover("..$dir/" + it.name, it.size) }
+                    }
                 }
                 // An upload cut off mid-copy. It may have been written through AFC2 (whole filesystem).
                 prefs.getString(PREF_PARTIAL_UPLOAD, null)?.let { saved ->
@@ -3929,8 +4101,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val groups = LinkedHashMap<String, Group>()
         if (archives.isNotEmpty()) groups["archives"] = group("Leftover app archives on the device", archives.size, archives.sumOf { it.size },
             archives.joinToString("\n") { "• " + it.name })
-        if (staged.isNotEmpty()) groups["staged"] = group("Unfinished installs and book copies on the device", staged.size, staged.sumOf { it.size },
-            staged.joinToString("\n") { "• " + if (it.name.startsWith("../")) "Books/" + it.name.substringAfterLast('/') + " (not in iBooks' list)" else it.name })
+        if (staged.isNotEmpty()) groups["staged"] = group("Unfinished installs and copies on the device", staged.size, staged.sumOf { it.size },
+            staged.joinToString("\n") { "• " + if (it.name.startsWith("../")) (if (it.name.startsWith("../Books/")) "Books/" + it.name.substringAfterLast('/') + " (not in iBooks' list)" else it.name.removePrefix("../")) else it.name })
         if (partial.isNotEmpty()) groups["partial"] = group("Partly uploaded file on the device", 1, partial[0].size, "• " + partial[0].name.substringAfter(':') +
             if (partial[0].name.startsWith("afc:")) "  (in the Media folder)" else "")
         if (pending.isNotEmpty()) groups["pending"] = group("Unfinished saves on this phone", pending.size, pending.sumOf { it.size },

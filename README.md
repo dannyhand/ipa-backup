@@ -38,6 +38,9 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
 - **Crash reports:** browse and save the device's crash logs
 - **Cydia packages** (AFC2): installed tweaks and repos as HTML plus a plain list for reinstalling
 - **Safari and call history** (AFC2): added to the Contacts & Notes export as readable HTML
+- **Music library backup:** zips the music library database (iTunesDB/iTunesCDB, iTunes Library.itlp or
+  MediaLibrary.sqlitedb, whichever the iOS version uses) and optionally the artwork. Restore copies the
+  files under temporary names first, keeps the current ones as .backup, then swaps them in
 - **Root certificates:** fixes Safari's "certificate for this server is invalid" on old iOS by installing a
   profile of current root certificates (Let's Encrypt, Google, DigiCert, Sectigo and others), over USB or
   from Safari over Wi-Fi. Also warns if the device's date is wrong, which causes the same error.
