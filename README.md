@@ -50,6 +50,8 @@ iTunes and iBooks are trademarks of Apple Inc.
 - **Crash reports:** browse and save the device's crash logs
 - **Cydia packages** (AFC2): installed tweaks and repos as HTML plus a plain list for reinstalling
 - **Safari and call history** (AFC2): added to the Contacts & Notes export as readable HTML
+- **Playlists:** export the device's playlists as .m3u files that point at the saved songs (and
+  optionally save any of their songs that aren't saved yet)
 - **Music library backup:** zips the music library database (iTunesDB/iTunesCDB, iTunes Library.itlp or
   MediaLibrary.sqlitedb, whichever the iOS version uses) and optionally the artwork. Restore copies the
   files under temporary names first, keeps the current ones as .backup, then swaps them in
