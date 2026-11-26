@@ -126,6 +126,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private companion object {
         const val ACTION_USB_PERMISSION = "us.dannyhand.ipabackup.USB_PERMISSION"
+        /** Device path of an upload in progress; set while copying, cleared when done. */
+        private const val PREF_PARTIAL_UPLOAD = "partial_upload"
         /** Root-filesystem AFC, installed by the "Apple File Conduit 2" jailbreak package. */
         const val AFC2_SERVICE = "com.apple.afc2"
         const val FILES_SUBFOLDER = "Files"
@@ -816,6 +818,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         /** Measure any folders in [items], then ask the user to confirm saving them all. */
         data class Prepare(val items: List<BrowserItem>, val returnTo: String) : BrowserCmd()
         data class Download(val items: List<BrowserItem>, val returnTo: String) : BrowserCmd()
+        /** Copy files picked on the phone into [dir] on the device. */
+        data class Upload(val uris: List<android.net.Uri>, val dir: String) : BrowserCmd()
         object Close : BrowserCmd()
     }
 
@@ -870,6 +874,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
                             runOnUiThread { showBrowser(label, cmd.path, entries, cmds) }
                         }
                         is BrowserCmd.Prepare -> prepareSave(afc, cmd, cmds)
+                        is BrowserCmd.Upload -> {
+                            if (!uploadFiles(afc, cmd, viaAfc2 = afc2 != null)) break
+                            cmds.offer(BrowserCmd.Open(cmd.dir))
+                        }
                         is BrowserCmd.Download -> {
                             val many = cmd.items.size > 1
                             var saved = 0
@@ -1081,7 +1089,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 neu.text = "Cancel selection"
             } else {
                 hintView.text = "Tap to open · hold to select several"
-                pos.visibility = View.GONE
+                pos.visibility = View.VISIBLE
+                pos.isEnabled = true
+                pos.text = "Upload here"
                 neu.visibility = if (atRoot) View.GONE else View.VISIBLE
                 neu.text = "Save folder (.zip)"
             }
@@ -1124,6 +1134,16 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
         dialog.setOnShowListener {
             dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+                if (!selecting) {
+                    // Hand the queue to the picker callback, which sends Upload (or reopens this folder if cancelled).
+                    if (!handled) {
+                        handled = true
+                        pendingUpload = cmds to path
+                        dialog.dismiss()
+                        pickUploads.launch(arrayOf("*/*"))
+                    }
+                    return@setOnClickListener
+                }
                 val items = selected.sorted().mapNotNull { i ->
                     val (name, e) = entries[i]
                     e?.let { BrowserItem(join(path, name), it.isDir, it.size) }
@@ -1146,6 +1166,88 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
         dialog.setOnCancelListener { if (!handled) { handled = true; cmds.offer(BrowserCmd.Close) } }
         dialog.show()
+    }
+
+    /** Browser waiting on the system file picker: its command queue and the folder to upload into. */
+    private var pendingUpload: Pair<LinkedBlockingQueue<BrowserCmd>, String>? = null
+
+    private val pickUploads = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        val (cmds, dir) = pendingUpload ?: return@registerForActivityResult
+        pendingUpload = null
+        cmds.offer(if (uris.isNullOrEmpty()) BrowserCmd.Open(dir) else BrowserCmd.Upload(uris, dir))
+    }
+
+    /** Name and size of a picked document. */
+    private fun docInfo(uri: android.net.Uri): Pair<String, Long> {
+        var name = uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+        var size = -1L
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME, android.provider.OpenableColumns.SIZE), null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                c.getString(0)?.let { name = it }
+                if (!c.isNull(1)) size = c.getLong(1)
+            }
+        }
+        return name.replace('/', '_') to size
+    }
+
+    /** "name.ext", or "name (2).ext", "name (3).ext"… so an upload never overwrites anything on the device. */
+    private fun freeName(afc: AfcClient, dir: String, name: String): String {
+        fun exists(n: String) = runCatching { afc.fileInfo(join(dir, n)) }.isSuccess
+        if (!exists(name)) return name
+        val dot = name.lastIndexOf('.').takeIf { it > 0 } ?: name.length
+        var k = 2
+        while (exists("${name.substring(0, dot)} ($k)${name.substring(dot)}")) k++
+        return "${name.substring(0, dot)} ($k)${name.substring(dot)}"
+    }
+
+    /**
+     * Worker thread: copies phone files into a device folder. AFC can write anywhere its root allows
+     * (all of /var/mobile/Media on regular AFC, the whole filesystem with AFC2). Files show up in the
+     * file browser, but the Music, Photos and Videos apps only list what's in their databases (which
+     * iTunes writes when syncing), so music or photos copied this way won't appear in those apps.
+     * Returns false if the connection was lost.
+     */
+    private fun uploadFiles(afc: AfcClient, cmd: BrowserCmd.Upload, viaAfc2: Boolean): Boolean {
+        val items = cmd.uris.map { it to docInfo(it) }
+        log("\nUploading ${items.size} file${if (items.size == 1) "" else "s"} (${humanSize(items.sumOf { maxOf(it.second.second, 0) })}) to ${cmd.dir}")
+        var ok = 0
+        for ((i, item) in items.withIndex()) {
+            val (uri, info) = item
+            val (name, size) = info
+            try {
+                val target = freeName(afc, cmd.dir, name)
+                log("[${i + 1}/${items.size}] $target" + if (target != name) "  (a file named $name is already there)" else "")
+                var lastPct = -1L
+                // Remembered until the copy finishes, so Clean up can delete it if the cable comes out.
+                prefs.edit().putString(PREF_PARTIAL_UPLOAD, (if (viaAfc2) "afc2:" else "afc:") + join(cmd.dir, target)).commit()
+                val n = contentResolver.openInputStream(uri)?.use { input ->
+                    afc.writeFile(join(cmd.dir, target), input, size) { done, total ->
+                        if (total > 8L shl 20) { // progress only for big files
+                            val pct = done * 100 / total / 25 * 25
+                            if (pct != lastPct && pct in 1..99) { lastPct = pct; log("  $pct%") }
+                        }
+                    }
+                } ?: throw IOException("Can't open $name on the phone")
+                prefs.edit().remove(PREF_PARTIAL_UPLOAD).apply()
+                ok++
+                log("  ✓ ${humanSize(n)}")
+            } catch (e: AfcException) {
+                log("  FAILED: ${e.message}")
+                prefs.getString(PREF_PARTIAL_UPLOAD, null)?.let { runCatching { afc.remove(it.substringAfter(':')) } }
+                prefs.edit().remove(PREF_PARTIAL_UPLOAD).apply()
+            } catch (e: Exception) {
+                if (e is IOException && e.message?.startsWith("Can't open") == true) {
+                    log("  FAILED: ${e.message}")
+                    prefs.edit().remove(PREF_PARTIAL_UPLOAD).apply()
+                    continue
+                }
+                log("  FAILED: ${e.message}")
+                log("Lost the connection to the iPod. Check the OTG adapter. Tools › Clean up can delete the partly copied file.")
+                return false
+            }
+        }
+        log(if (ok == items.size) "Done: $ok uploaded." else "Done: $ok of ${items.size} uploaded.")
+        return true
     }
 
     private fun zipBaseName(path: String) = IpaSaver.clean(path.trimEnd('/').substringAfterLast('/').ifEmpty { "root" })
@@ -2996,14 +3098,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val connected = usbManager.deviceList.values.any { AppleUsbTransport.isApple(it) && AppleUsbTransport.findMuxInterface(it) != null }
         if (!connected) {
             log("\nNo device connected: checking this phone only.")
-            showCleanup(null, emptyList(), emptyList())
+            showCleanup(null, emptyList(), emptyList(), emptyList())
             return
         }
         withDevice { device ->
             log("\nLooking for leftovers on the device…")
             var archives = emptyList<Leftover>()
             var staged = emptyList<Leftover>()
-            runOnDevice(device, after = { runOnUiThread { showCleanup(device, archives, staged) } }) { mux, lockdown ->
+            var partial = emptyList<Leftover>()
+            runOnDevice(device, after = { runOnUiThread { showCleanup(device, archives, staged, partial) } }) { mux, lockdown ->
                 withService(mux, lockdown, AfcClient.SERVICE) { s ->
                     val afc = AfcClient(s)
                     fun scan(dir: String, filter: (String) -> Boolean) =
@@ -3017,6 +3120,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     archives = scan("/ApplicationArchives") { it.endsWith(".zip") }
                     staged = scan("/PublicStaging") { true }
                 }
+                // An upload cut off mid-copy. It may have been written through AFC2 (whole filesystem).
+                prefs.getString(PREF_PARTIAL_UPLOAD, null)?.let { saved ->
+                    val path = saved.substringAfter(':')
+                    val afc2 = if (saved.startsWith("afc2:")) tryAfc2(mux, lockdown) else null
+                    val found = if (afc2 != null) afc2.use { s -> runCatching { AfcClient(s).stat(path).size }.getOrNull() }
+                        else withService(mux, lockdown, AfcClient.SERVICE) { s -> runCatching { AfcClient(s).stat(path).size }.getOrNull() }
+                    if (found != null) partial = listOf(Leftover(saved, found)) else prefs.edit().remove(PREF_PARTIAL_UPLOAD).apply()
+                }
             }
         }
     }
@@ -3026,7 +3137,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     private fun dirSize(f: java.io.File): Long = if (f.isDirectory) f.listFiles()?.sumOf { dirSize(it) } ?: 0L else f.length()
 
-    private fun showCleanup(device: UsbDevice?, archives: List<Leftover>, staged: List<Leftover>) {
+    private fun showCleanup(device: UsbDevice?, archives: List<Leftover>, staged: List<Leftover>, partial: List<Leftover>) {
         val saver = IpaSaver(this)
         val pending = saver.listPending()
         val temp = tempFiles()
@@ -3042,6 +3153,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
             archives.joinToString("\n") { "• " + it.name })
         if (staged.isNotEmpty()) groups["staged"] = group("Unfinished installs on the device", staged.size, staged.sumOf { it.size },
             staged.joinToString("\n") { "• " + it.name })
+        if (partial.isNotEmpty()) groups["partial"] = group("Partly uploaded file on the device", 1, partial[0].size, "• " + partial[0].name.substringAfter(':') +
+            if (partial[0].name.startsWith("afc:")) "  (in the Media folder)" else "")
         if (pending.isNotEmpty()) groups["pending"] = group("Unfinished saves on this phone", pending.size, pending.sumOf { it.size },
             pending.joinToString("\n") { "• " + it.name })
         if (tempSize > 0) groups["temp"] = group("Temporary files on this phone", temp.size, tempSize,
@@ -3083,13 +3196,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
             .setPositiveButton("Delete selected") { _, _ ->
                 fun on(key: String) = groups[key]?.box?.isChecked == true
                 runCleanup(device, if (on("archives")) archives else emptyList(), if (on("staged")) staged else emptyList(),
+                    if (on("partial")) partial else emptyList(),
                     if (on("pending")) pending else emptyList(), on("temp"))
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun runCleanup(device: UsbDevice?, archives: List<Leftover>, staged: List<Leftover>, pending: List<IpaSaver.Saved>, temp: Boolean) {
+    private fun runCleanup(device: UsbDevice?, archives: List<Leftover>, staged: List<Leftover>, partial: List<Leftover>, pending: List<IpaSaver.Saved>, temp: Boolean) {
         // Phone side first: quick and needs no connection.
         if (pending.isNotEmpty()) {
             val saver = IpaSaver(this)
@@ -3100,9 +3214,17 @@ class MainActivity : androidx.activity.ComponentActivity() {
             val freed = tempFiles().sumOf { f -> dirSize(f).also { f.deleteRecursively() } }
             log("Deleted temporary files (${humanSize(freed)}).")
         }
-        if (device == null || (archives.isEmpty() && staged.isEmpty())) return
+        if (device == null || (archives.isEmpty() && staged.isEmpty() && partial.isEmpty())) return
         log("\nCleaning up the device…")
         runOnDevice(device) { mux, lockdown ->
+            for (p in partial) {
+                val path = p.name.substringAfter(':')
+                val afc2 = if (p.name.startsWith("afc2:")) tryAfc2(mux, lockdown) else null
+                val ok = if (afc2 != null) afc2.use { s -> runCatching { AfcClient(s).remove(path) }.isSuccess }
+                    else withService(mux, lockdown, AfcClient.SERVICE) { s -> runCatching { AfcClient(s).remove(path) }.isSuccess }
+                if (ok) { prefs.edit().remove(PREF_PARTIAL_UPLOAD).apply(); log("Deleted the partly uploaded $path ✓") }
+                else log("  couldn't delete $path")
+            }
             withService(mux, lockdown, AfcClient.SERVICE) { s ->
                 val afc = AfcClient(s)
                 if (archives.isNotEmpty()) {

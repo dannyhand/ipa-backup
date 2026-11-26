@@ -22,11 +22,13 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
 - **Restore:** install `.ipa` backups (or any `.ipa` on the phone) back onto a device, optionally with
   their app data, or restore just the app data into apps that are already installed. App Store apps need
   the Apple ID that bought them, or a jailbroken device with AppSync.
-- **Clean up:** finds and deletes leftovers from interrupted transfers: app archives and unfinished
-  installs on the device, unfinished saves and temporary files on the phone
+- **Clean up:** finds and deletes leftovers from interrupted transfers: app archives, unfinished
+  installs and partly uploaded files on the device, unfinished saves and temporary files on the phone
 - **Jailbroken devices (AFC2):** if archiving fails, the app bundle is copied straight from the filesystem.
   **Browse files** shows the whole filesystem and saves any file or folder.
 - **Non-jailbroken devices:** Browse files shows the media folder (`/var/mobile/Media`)
+- **Upload files** from the phone into the folder you're browsing. Existing files are never overwritten.
+  Music and photos copied this way don't show up in the iPod's Music or Photos apps.
 - **Music:** browse the iPod's music library by artist, title and album, search it, and copy songs as
   `Artist - Title.mp3` to `Download/IPA Backup/Music/`. Song info from the iPod's library (title, artist,
   album, album artist, genre, composer, year, track/disc) is written into the files, since iTunes strips it.
