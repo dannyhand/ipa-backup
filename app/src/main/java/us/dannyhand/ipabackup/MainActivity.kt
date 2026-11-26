@@ -64,6 +64,8 @@ import us.dannyhand.ipabackup.music.ITunesDb
 import us.dannyhand.ipabackup.music.ItlpLibrary
 import us.dannyhand.ipabackup.music.MusicLibrary
 import us.dannyhand.ipabackup.music.LibrarySample
+import us.dannyhand.ipabackup.music.Playlist
+import us.dannyhand.ipabackup.music.Playlists
 import us.dannyhand.ipabackup.util.AudioTagger
 import us.dannyhand.ipabackup.util.ExifThumb
 import us.dannyhand.ipabackup.util.IpaInfo
@@ -164,6 +166,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         const val PERSONAL_SUBFOLDER = "Personal"
         const val CRASH_SUBFOLDER = "Crash Reports"
         const val LOGS_SUBFOLDER = "Logs"
+        const val PLAYLISTS_SUBFOLDER = "Playlists"
         const val MUSICLIB_SUBFOLDER = "Music Library Backups"
         const val LIB_DIR = "/iTunes_Control/iTunes"
         const val ART_DIR = "/iTunes_Control/Artwork"
@@ -215,7 +218,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             Feature("Back up apps", Icons.Outlined.Apps, "Apps") { withDevice(::probe) },
             Feature("Restore", Icons.Outlined.InstallMobile, "Apps") { withDevice(::showRestorePicker) },
             Feature("Uninstall", Icons.Outlined.DeleteSweep, "Apps") { withDevice(::startUninstall) },
-            Feature("Music", Icons.Outlined.LibraryMusic, "Media") { withDevice { d -> browseMusic(d, otherMedia = false) } },
+            Feature("Music", Icons.Outlined.LibraryMusic, "Media") { withDevice(::showMusicMenu) },
             Feature("Photos", Icons.Outlined.PhotoLibrary, "Media") { withDevice(::browsePhotos) },
             Feature("Other media", Icons.Outlined.Podcasts, "Media") { withDevice { d -> browseMusic(d, otherMedia = true) } },
             Feature("Voice Memos", Icons.Outlined.Mic, "Media") { withDevice(::browseVoiceMemos) },
@@ -1405,12 +1408,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
      * Reads the iPod's music library: MediaLibrary.sqlitedb (iOS 5+), or the iTunes Library.itlp
      * folder (iPhone OS 3 / iOS 4). Returns null (after logging why) if neither can be read.
      */
-    private fun loadMusicLibrary(afc: AfcClient): List<MusicLibrary.Track>? {
+    private fun loadMusicLibrary(afc: AfcClient, playlists: MutableList<Playlist>? = null): List<MusicLibrary.Track>? {
         copySqlite(afc, MusicLibrary.DB_PATH, "medialib")?.let { file ->
             return try {
                 withSqlite(file) { db ->
                     val lib = MusicLibrary(db)
-                    lib.load().also { log("(library: ${lib.diagnostics})") }
+                    lib.load().also {
+                        log("(library: ${lib.diagnostics})")
+                        playlists?.addAll(runCatching { Playlists.fromSql(db) }.onFailure { e -> log("(couldn't read playlists: ${e.message})") }.getOrDefault(emptyList()))
+                    }
                 }
             } catch (e: Exception) {
                 log("Couldn't read the music library: ${e.message}")
@@ -1424,7 +1430,10 @@ class MainActivity : androidx.activity.ComponentActivity() {
             return try {
                 withSqlite(library) { db ->
                     db.exec("ATTACH DATABASE '${locations.path.replace("'", "''")}' AS loc")
-                    ItlpLibrary(db).load().also { log("(library: iOS 3/4 iTunes Library.itlp, ${it.size} items)") }
+                    ItlpLibrary(db).load().also {
+                        log("(library: iOS 3/4 iTunes Library.itlp, ${it.size} items)")
+                        playlists?.addAll(runCatching { Playlists.fromSql(db) }.onFailure { e -> log("(couldn't read playlists: ${e.message})") }.getOrDefault(emptyList()))
+                    }
                 }
             } catch (e: Exception) {
                 log("Couldn't read the iOS 3/4 music library: ${e.message}")
@@ -1435,7 +1444,11 @@ class MainActivity : androidx.activity.ComponentActivity() {
         for (path in listOf(ITunesDb.CDB_PATH, ITunesDb.DB_PATH)) {
             val size = runCatching { afc.stat(path).size }.getOrNull() ?: continue
             return try {
-                ITunesDb.parse(afc.readHead(path, size.toInt())).also { log("(library: iPhone OS 1–2 ${path.substringAfterLast('/')}, ${it.size} items)") }
+                val raw = afc.readHead(path, size.toInt())
+                ITunesDb.parse(raw).also {
+                    log("(library: iPhone OS 1–2 ${path.substringAfterLast('/')}, ${it.size} items)")
+                    playlists?.addAll(runCatching { ITunesDb.parsePlaylists(raw) }.getOrDefault(emptyList()))
+                }
             } catch (e: Exception) {
                 log("Couldn't read ${path.substringAfterLast('/')}: ${e.message}")
                 null
@@ -1707,6 +1720,97 @@ class MainActivity : androidx.activity.ComponentActivity() {
         disc = t.discNumber,
         discCount = t.discCount,
     )
+
+    // ---------------------------------------------------------------- playlists
+
+    private fun showMusicMenu(device: UsbDevice) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Music")
+            .setItems(arrayOf("Songs", "Playlists")) { _, which ->
+                if (which == 0) browseMusic(device, otherMedia = false) else startPlaylists(device)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Reads the library and its playlists, then lets the user pick which to export as .m3u. */
+    private fun startPlaylists(device: UsbDevice) {
+        log("\nLoading playlists…")
+        var tracks: List<MusicLibrary.Track> = emptyList()
+        val playlists = ArrayList<Playlist>()
+        runOnDevice(device, after = { if (playlists.isNotEmpty()) runOnUiThread { showPlaylists(device, tracks, playlists) } }) { mux, lockdown ->
+            withService(mux, lockdown, AfcClient.SERVICE) { s ->
+                tracks = loadMusicLibrary(AfcClient(s), playlists) ?: return@withService
+                log(if (playlists.isEmpty()) "No playlists on the device." else "${playlists.size} playlists.")
+            }
+        }
+    }
+
+    private fun showPlaylists(device: UsbDevice, tracks: List<MusicLibrary.Track>, playlists: List<Playlist>) {
+        if (isFinishing) return
+        val byId = tracks.associateBy { it.pid }
+        val labels = playlists.map { p ->
+            val n = p.itemPids.count { it in byId }
+            "${p.name}  ·  $n song${if (n == 1) "" else "s"}" + if (p.smart) "  ·  smart" else ""
+        }
+        val checked = BooleanArray(playlists.size) { true }
+        val copyBox = MaterialCheckBox(this).apply {
+            text = "Also copy songs that aren't saved yet"
+            isChecked = prefs.getBoolean("playlist_copy_songs", false)
+        }
+        val list = android.widget.ListView(this).apply {
+            choiceMode = android.widget.ListView.CHOICE_MODE_MULTIPLE
+            adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_multiple_choice, labels)
+            for (i in labels.indices) setItemChecked(i, true)
+            setOnItemClickListener { _, _, i, _ -> checked[i] = isItemChecked(i) }
+        }
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, 0, pad, 0)
+            addView(TextView(this@MainActivity).apply {
+                text = "Saved as .m3u playlists in Download/IPA Backup/$PLAYLISTS_SUBFOLDER. They point at the songs in " +
+                    "IPA Backup/Music (named Artist - Title), so the songs need to be saved there too."
+                textSize = 13f
+                alpha = 0.8f
+            })
+            addView(copyBox)
+            addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.45).toInt()))
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Export playlists")
+            .setView(body)
+            .setPositiveButton("Export") { _, _ ->
+                prefs.edit().putBoolean("playlist_copy_songs", copyBox.isChecked).apply()
+                val chosen = playlists.filterIndexed { i, _ -> checked[i] }
+                if (chosen.isNotEmpty()) exportPlaylists(device, chosen, byId, copyBox.isChecked)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun exportPlaylists(device: UsbDevice, chosen: List<Playlist>, byId: Map<Long, MusicLibrary.Track>, copySongsToo: Boolean) {
+        log("\nSaving ${chosen.size} playlist(s)…")
+        val used = HashSet<String>()
+        for (p in chosen) {
+            val name = MusicLibrary.uniqueName(IpaSaver.clean(p.name).ifBlank { "Playlist" } + ".m3u", used)
+            runCatching { saveBytes(name, PLAYLISTS_SUBFOLDER, Playlists.m3u(p, byId).toByteArray()) }
+                .onSuccess { log("  $name (${p.itemPids.count { it in byId }} songs)") }
+                .onFailure { log("  $name FAILED: ${it.message}") }
+        }
+        if (!copySongsToo) { log("Done."); return }
+        // Songs in these playlists that aren't in the save folders yet.
+        val saver = IpaSaver(this)
+        val existing = HashMap<String, Set<String>>()
+        val missing = chosen.flatMap { it.itemPids }.distinct().mapNotNull { byId[it] }.filter { t ->
+            MusicLibrary.saveName(t).lowercase() !in existing.getOrPut(t.kind.folder) { saver.existingNames(t.kind.folder).map { it.lowercase() }.toSet() }
+        }
+        if (missing.isEmpty()) { log("All their songs are already saved ✓"); return }
+        log("${missing.size} song(s) not saved yet (${humanSize(missing.sumOf { it.size })}).")
+        runOnDevice(device) { mux, lockdown ->
+            withService(mux, lockdown, AfcClient.SERVICE) { s -> copySongs(AfcClient(s), missing, prefs.getBoolean("write_tags", true)) }
+        }
+    }
 
     // ---------------------------------------------------------------- photos & videos
 

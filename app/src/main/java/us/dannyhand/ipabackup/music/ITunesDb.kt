@@ -77,6 +77,60 @@ object ITunesDb {
         return tracks.sortedWith(compareBy({ it.kind.ordinal }, { it.artist.lowercase() }, { it.album.lowercase() }, { it.trackNumber }, { it.title.lowercase() }))
     }
 
+    /**
+     * Playlists from an iTunesDB: the type-2 mhsd holds an mhlp list of mhyp playlists. Each mhyp has
+     * mhod children (type 1 = its name) then mhip entries whose track ID (offset 24) matches an mhit's
+     * unique ID. The first, hidden playlist (flag at offset 20) is the whole library and is skipped.
+     */
+    fun parsePlaylists(raw: ByteArray): List<Playlist> {
+        val r = Reader(decompressIfNeeded(raw))
+        val out = ArrayList<Playlist>()
+        val sections = r.i32(20)
+        var p = r.i32(4)
+        for (s in 0 until maxOf(sections, 1)) {
+            if (r.tag(p) != "mhsd") break
+            val sdHeader = r.i32(p + 4)
+            val sdTotal = r.i32(p + 8)
+            if (sdTotal <= 0) break
+            if (r.i32(p + 12) == 2 && r.tag(p + sdHeader) == "mhlp") {
+                val lp = p + sdHeader
+                val count = r.i32(lp + 8)
+                var q = lp + r.i32(lp + 4)
+                repeat(count) {
+                    if (q >= p + sdTotal || r.tag(q) != "mhyp") return@repeat
+                    val header = r.i32(q + 4)
+                    val total = r.i32(q + 8)
+                    if (header <= 0 || total < header) return out
+                    val hidden = r.i32(q + 20) and 0xFF != 0
+                    var name: String? = null
+                    val pids = ArrayList<Long>()
+                    var smart = false
+                    var m = q + header
+                    while (m + 12 <= q + total) {
+                        val tag = r.tag(m)
+                        val mTotal = r.i32(m + 8)
+                        if (mTotal <= 0) break
+                        when (tag) {
+                            "mhod" -> when (r.i32(m + 12)) {
+                                1 -> if (mTotal >= 40) {
+                                    val len = r.i32(m + 28)
+                                    if (len in 0..(mTotal - 40)) name = String(r.b, m + 40, len, if (r.i32(m + 24) == 2) Charsets.UTF_8 else Charsets.UTF_16LE)
+                                }
+                                50, 51 -> smart = true
+                            }
+                            "mhip" -> pids += r.u32(m + 24)
+                        }
+                        m += mTotal
+                    }
+                    if (!hidden && !name.isNullOrBlank()) out += Playlist(name!!.trim(), pids, smart)
+                    q += total
+                }
+            }
+            p += sdTotal
+        }
+        return out.sortedBy { it.name.lowercase() }
+    }
+
     private fun parseTrackList(r: Reader, start: Int, end: Int, out: MutableList<MusicLibrary.Track>) {
         if (r.tag(start) != "mhlt") return
         val count = r.i32(start + 8)
