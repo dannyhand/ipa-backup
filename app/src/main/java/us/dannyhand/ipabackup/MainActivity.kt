@@ -32,6 +32,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import us.dannyhand.ipabackup.afc.AfcClient
+import us.dannyhand.ipabackup.afc.AfcException
 import us.dannyhand.ipabackup.afc.AfcZipper
 import us.dannyhand.ipabackup.afc.CancelledException
 import us.dannyhand.ipabackup.afc.TreeSize
@@ -856,25 +857,41 @@ class MainActivity : androidx.activity.ComponentActivity() {
                                 afc.readDir(cmd.path).sortedBy { it.lowercase() }.map { name ->
                                     BrowserEntry(name, runCatching { afc.stat(join(cmd.path, name)) }.getOrNull())
                                 }
-                            } catch (e: Exception) {
+                            } catch (e: AfcException) {
+                                // The device refused (e.g. no permission): go back up a level.
                                 log("Can't open ${cmd.path}: ${e.message}")
                                 if (cmd.path != "/") cmds.offer(BrowserCmd.Open(parent(cmd.path))) else break
                                 continue
+                            } catch (e: Exception) {
+                                // Anything else means the connection itself is gone (cable out, iPod asleep).
+                                log("Lost the connection to the iPod (${e.message}). Check the OTG adapter.")
+                                break
                             }
                             runOnUiThread { showBrowser(label, cmd.path, entries, cmds) }
                         }
                         is BrowserCmd.Prepare -> prepareSave(afc, cmd, cmds)
                         is BrowserCmd.Download -> {
                             val many = cmd.items.size > 1
-                            cmd.items.forEachIndexed { i, item ->
+                            var saved = 0
+                            var lost = false
+                            for ((i, item) in cmd.items.withIndex()) {
                                 if (many) log("[${i + 1}/${cmd.items.size}] ${item.path}")
                                 try {
                                     downloadPath(afc, saver, item.path, item.isDir)
-                                } catch (e: Exception) {
+                                    saved++
+                                } catch (e: AfcException) {
                                     log("Download failed: ${e.message}")
+                                } catch (e: Exception) {
+                                    // Connection gone: the partial file on the phone was already discarded.
+                                    // Nothing is written to the iPod when saving, so nothing is left there.
+                                    log("Download failed: ${e.message}")
+                                    log("Lost the connection to the iPod. Check the OTG adapter.")
+                                    lost = true
+                                    break
                                 }
                             }
-                            if (many) log("Saved ${cmd.items.size} items.")
+                            if (many) log(if (saved == cmd.items.size) "Saved $saved items." else "Saved $saved of ${cmd.items.size} items.")
+                            if (lost) break
                             cmds.offer(BrowserCmd.Open(cmd.returnTo))
                         }
                     }
