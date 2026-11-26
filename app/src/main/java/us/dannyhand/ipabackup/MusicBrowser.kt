@@ -505,11 +505,17 @@ internal fun MainActivity.tagsFor(t: MusicLibrary.Track) = AudioTagger.Tags(
 
 // ---------------------------------------------------------------- playlists
 
-internal fun MainActivity.showMusicMenu(device: UsbDevice) {
+internal fun MainActivity.showMusicMenu(device: UsbDevice?) {
+    val items = if (device != null) arrayOf("Songs", "Playlists", "Add songs…") else arrayOf("Add songs (check files without the device)…")
     MaterialAlertDialogBuilder(this)
         .setTitle("Music")
-        .setItems(arrayOf("Songs", "Playlists")) { _, which ->
-            if (which == 0) browseMusic(device, otherMedia = false) else startPlaylists(device)
+        .setItems(items) { _, which ->
+            when {
+                device == null -> launchSongPicker(null)
+                which == 0 -> browseMusic(device, otherMedia = false)
+                which == 1 -> startPlaylists(device)
+                else -> launchSongPicker(device)
+            }
         }
         .setNegativeButton("Cancel", null)
         .show()

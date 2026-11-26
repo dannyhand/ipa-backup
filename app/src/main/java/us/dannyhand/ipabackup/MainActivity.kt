@@ -193,7 +193,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             Feature("Back up apps", Icons.Outlined.Apps, "Apps") { withDevice(this::probe) },
             Feature("Restore", Icons.Outlined.InstallMobile, "Apps") { withDevice(this::showRestorePicker) },
             Feature("Uninstall", Icons.Outlined.DeleteSweep, "Apps") { withDevice(this::startUninstall) },
-            Feature("Music", Icons.Outlined.LibraryMusic, "Media") { withDevice(this::showMusicMenu) },
+            Feature("Music", Icons.Outlined.LibraryMusic, "Media") { startMusic() },
             Feature("Photos", Icons.Outlined.PhotoLibrary, "Media") { withDevice(this::browsePhotos) },
             Feature("Other media", Icons.Outlined.Podcasts, "Media") { withDevice { d -> browseMusic(d, otherMedia = true) } },
             Feature("Voice Memos", Icons.Outlined.Mic, "Media") { withDevice(this::browseVoiceMemos) },
@@ -557,6 +557,16 @@ class MainActivity : androidx.activity.ComponentActivity() {
     internal val musicSelected = HashSet<Long>()
     @Volatile internal var musicOther = false
     internal var musicQuery = ""
+
+    /** Add songs: the device (if any) waiting on the file picker, and the songs staged for adding. */
+    internal var addSongsDevice: UsbDevice? = null
+    internal var addSongsPending = false
+    internal var stagedSongs: List<StagedSong> = emptyList()
+    internal val pickSongs = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (!addSongsPending) return@registerForActivityResult
+        addSongsPending = false
+        if (!uris.isNullOrEmpty()) prepareSongs(addSongsDevice, uris)
+    }
 
     // ---------------------------------------------------------------- playlists  (functions in MusicBrowser.kt)
     // ---------------------------------------------------------------- photos & videos  (functions in PhotoBrowser.kt)
