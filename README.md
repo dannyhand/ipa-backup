@@ -9,9 +9,9 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
 ## Screenshots
 
 <p>
-  <img src="docs/screenshots/main.png" alt="Main screen" width="260">
-  <img src="docs/screenshots/backup-running.png" alt="Backing up apps, with progress and Stop" width="260">
-  <img src="docs/screenshots/dark-mode.png" alt="Dark mode" width="260">
+  <img src="docs/screenshots/main.png" alt="Main screen" width="30%">
+  <img src="docs/screenshots/backup-running.png" alt="Backing up apps, with progress and Stop" width="30%">
+  <img src="docs/screenshots/dark-mode.png" alt="Dark mode" width="30%">
 </p>
 
 ## Features
