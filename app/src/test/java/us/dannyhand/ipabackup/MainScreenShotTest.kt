@@ -60,7 +60,7 @@ class MainScreenShotTest {
     private val notes = mapOf("Personal data" to "needs a jailbroken device with AFC2")
 
     private fun shot(name: String, state: UiState) = captureRoboImage("build/outputs/roborazzi/$name.png") {
-        IpaBackupTheme { MainScreen(state, features, notes, {}, {}, {}) }
+        IpaBackupTheme { MainScreen(state, features, notes, onCopyLog = {}, onClearLog = {}, onStop = {}) }
     }
 
     @Test

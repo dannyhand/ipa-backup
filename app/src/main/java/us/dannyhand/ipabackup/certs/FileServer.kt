@@ -4,21 +4,26 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.SocketException
+import java.net.URLEncoder
 import kotlin.concurrent.thread
 
 /**
- * Tiny plain-HTTP server that hands out one profile, for installing it from Safari on the iPod over
- * Wi-Fi (both on the same network). Plain HTTP on purpose: HTTPS is exactly what's broken on the iPod.
- * Safari on iOS 6 recognizes the content type and opens the Install Profile screen.
+ * Tiny plain-HTTP server for handing files to the device's Safari over Wi-Fi (both on the same
+ * network). Plain HTTP on purpose: HTTPS is what's broken on old iOS. Safari on iOS 6 opens a
+ * .mobileconfig in the Install Profile screen, and offers "Open in iBooks" for an EPUB or PDF.
  */
-class ProfileServer(private val profile: ByteArray, private val onRequest: (String) -> Unit) {
+class FileServer(private val title: String, private val files: List<File>, private val onRequest: (String) -> Unit) {
+    class File(val name: String, val mime: String, val bytes: ByteArray, val linkText: String = name)
+
     private var server: ServerSocket? = null
     val port get() = server?.localPort ?: 0
+
+    private fun path(i: Int) = "/f/$i/" + URLEncoder.encode(files[i].name, "UTF-8").replace("+", "%20")
 
     fun start(preferredPort: Int = 8080) {
         val s = runCatching { ServerSocket(preferredPort) }.getOrElse { ServerSocket(0) }
         server = s
-        thread(isDaemon = true, name = "profile-server") {
+        thread(isDaemon = true, name = "file-server") {
             while (!s.isClosed) {
                 val c = try { s.accept() } catch (e: SocketException) { break }
                 thread(isDaemon = true) {
@@ -27,17 +32,19 @@ class ProfileServer(private val profile: ByteArray, private val onRequest: (Stri
                             c.soTimeout = 10_000
                             val req = c.getInputStream().bufferedReader().readLine() ?: return@runCatching
                             onRequest("${c.inetAddress.hostAddress}: $req")
-                            val path = req.split(' ').getOrNull(1) ?: "/"
+                            val p = req.split(' ').getOrNull(1) ?: "/"
                             val out = c.getOutputStream()
-                            if (path.startsWith("/roots")) {
-                                out.write(("HTTP/1.0 200 OK\r\nContent-Type: application/x-apple-aspen-config\r\n" +
-                                    "Content-Disposition: attachment; filename=\"roots.mobileconfig\"\r\n" +
-                                    "Content-Length: ${profile.size}\r\nConnection: close\r\n\r\n").toByteArray())
-                                out.write(profile)
+                            val idx = Regex("^/f/(\\d+)/").find(p)?.groupValues?.get(1)?.toIntOrNull()
+                            if (idx != null && idx in files.indices) {
+                                val f = files[idx]
+                                out.write(("HTTP/1.0 200 OK\r\nContent-Type: ${f.mime}\r\n" +
+                                    "Content-Length: ${f.bytes.size}\r\nConnection: close\r\n\r\n").toByteArray())
+                                out.write(f.bytes)
                             } else {
-                                val html = "<html><head><meta name=viewport content=\"width=device-width\"></head><body " +
-                                    "style=\"font-family:Helvetica;font-size:20px;padding:20px\"><p>Updated root certificates " +
-                                    "for old iOS.</p><p><a href=\"/roots.mobileconfig\">Install profile</a></p></body></html>"
+                                fun esc(t: String) = t.replace("&", "&amp;").replace("<", "&lt;")
+                                val links = files.indices.joinToString("") { "<p><a href=\"${path(it)}\">${esc(files[it].linkText)}</a></p>" }
+                                val html = "<html><head><meta name=viewport content=\"width=device-width\"><title>${esc(title)}</title></head><body " +
+                                    "style=\"font-family:Helvetica;font-size:20px;padding:20px\"><p><b>${esc(title)}</b></p>$links</body></html>"
                                 val b = html.toByteArray()
                                 out.write(("HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n" +
                                     "Content-Length: ${b.size}\r\nConnection: close\r\n\r\n").toByteArray())

@@ -40,7 +40,10 @@ import us.dannyhand.ipabackup.diag.DiagnosticsRelay
 import us.dannyhand.ipabackup.jailbreak.Dpkg
 import us.dannyhand.ipabackup.util.CpBitmap
 import us.dannyhand.ipabackup.util.CgbiPng
-import us.dannyhand.ipabackup.certs.ProfileServer
+import us.dannyhand.ipabackup.certs.FileServer
+import us.dannyhand.ipabackup.media.BookImport
+import us.dannyhand.ipabackup.springboard.NotificationProxy
+import us.dannyhand.ipabackup.afc.unzipInto
 import us.dannyhand.ipabackup.certs.RootProfile
 import us.dannyhand.ipabackup.afc.AfcZipper
 import us.dannyhand.ipabackup.afc.CancelledException
@@ -157,6 +160,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
         const val BOOKS_SUBFOLDER = "Books"
         const val PERSONAL_SUBFOLDER = "Personal"
         const val CRASH_SUBFOLDER = "Crash Reports"
+        const val LOGS_SUBFOLDER = "Logs"
+        /** Name of a book copied in by Books › Add (a 16-hex-digit Persistent ID). */
+        private val BOOK_COPY = Regex("^[0-9A-F]{16}\\.(epub|pdf)$")
         const val THUMB_PX = 200
         /** Formats we can write song info into (DRM .m4p is left untouched). */
         val TAGGABLE = setOf("m4a", "m4b", "m4r", "aac", "mp3")
@@ -207,7 +213,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             Feature("Photos", Icons.Outlined.PhotoLibrary, "Media") { withDevice(::browsePhotos) },
             Feature("Other media", Icons.Outlined.Podcasts, "Media") { withDevice { d -> browseMusic(d, otherMedia = true) } },
             Feature("Voice Memos", Icons.Outlined.Mic, "Media") { withDevice(::browseVoiceMemos) },
-            Feature("Books", Icons.Outlined.MenuBook, "Media") { withDevice(::browseBooks) },
+            Feature("Books", Icons.Outlined.MenuBook, "Media") { startBooks() },
             Feature("Messages", Icons.Outlined.Forum, "Personal data", needsJailbreak = true) { withDevice(::exportMessages) },
             Feature("Contacts, Notes & more", Icons.Outlined.Contacts, "Personal data", needsJailbreak = true) { withDevice(::exportPersonalData) },
             Feature("Cydia packages", Icons.Outlined.Extension, "Personal data", needsJailbreak = true) { withDevice(::exportCydia) },
@@ -228,6 +234,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     features = features,
                     sectionNotes = notes,
                     onCopyLog = ::copyLog,
+                    onSaveLog = ::saveLog,
                     onClearLog = { ui.log.clear() },
                     onStop = ::confirmStop,
                 )
@@ -253,7 +260,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
 
     override fun onDestroy() {
         unregisterReceiver(permissionReceiver)
-        profileServer?.stop()
+        fileServer?.stop()
         super.onDestroy()
     }
 
@@ -3698,14 +3705,21 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
     }
 
-    private var profileServer: ProfileServer? = null
+    private var fileServer: FileServer? = null
 
-    private fun shareProfileOverWifi(profile: ByteArray) {
-        profileServer?.stop()
-        val server = ProfileServer(profile) { line -> log("  request from $line") }
+    private fun shareProfileOverWifi(profile: ByteArray) = shareOverWifi(
+        "Updated root certificates for old iOS",
+        listOf(FileServer.File("roots.mobileconfig", "application/x-apple-aspen-config", profile, "Install profile")),
+        "Tap Install profile, then Install.",
+    )
+
+    /** Serves [files] over plain HTTP until the dialog is closed; the device opens the shown address in Safari. */
+    private fun shareOverWifi(title: String, files: List<FileServer.File>, howTo: String) {
+        fileServer?.stop()
+        val server = FileServer(title, files) { line -> log("  request from $line") }
         try { server.start() } catch (e: Exception) { log("Couldn't start the Wi-Fi server: ${e.message}"); return }
-        profileServer = server
-        val addrs = ProfileServer.localAddresses()
+        fileServer = server
+        val addrs = FileServer.localAddresses()
         if (addrs.isEmpty()) {
             server.stop()
             log("No Wi-Fi network found on this phone.")
@@ -3715,22 +3729,126 @@ class MainActivity : androidx.activity.ComponentActivity() {
             return
         }
         val urls = addrs.map { "http://$it:${server.port}/" }
-        log("\nSharing the certificate profile at ${urls.joinToString(" or ")}")
+        log("\nSharing over Wi-Fi at ${urls.joinToString(" or ")}")
         val text = TextView(this).apply {
             val pad = (20 * resources.displayMetrics.density).toInt()
             setPadding(pad, pad / 2, pad, 0)
             setTextIsSelectable(true)
             textSize = 15f
             text = "On the device, open Safari and go to:\n\n" + urls.joinToString("\n") +
-                "\n\nTap Install profile, then Install. Both need to be on the same Wi-Fi " +
-                "(this phone's hotspot works too). Keep this open until it's installed."
+                "\n\n$howTo\n\nBoth need to be on the same Wi-Fi (this phone's hotspot works too). Keep this open until you're done."
         }
         MaterialAlertDialogBuilder(this)
-            .setTitle("Install over Wi-Fi")
+            .setTitle("Share over Wi-Fi")
             .setView(text)
             .setCancelable(false)
-            .setPositiveButton("Done") { _, _ -> server.stop(); profileServer = null; log("Stopped sharing the profile.") }
+            .setPositiveButton("Done") { _, _ -> server.stop(); fileServer = null; log("Stopped sharing.") }
             .show()
+    }
+
+    // ---------------------------------------------------------------- add books
+
+    /** Books works without a device too (adding over Wi-Fi). */
+    private fun startBooks() {
+        if (busy) { log("Busy, please wait for the current operation to finish."); return }
+        val connected = usbManager.deviceList.values.any { AppleUsbTransport.isApple(it) && AppleUsbTransport.findMuxInterface(it) != null }
+        if (connected) withDevice { showBooksMenu(it) } else showBooksMenu(null)
+    }
+
+    private var pendingBooksDevice: UsbDevice? = null
+    private val pickBooks = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        val device = pendingBooksDevice
+        pendingBooksDevice = null
+        if (!uris.isNullOrEmpty()) prepareBooks(device, uris)
+    }
+
+    private fun showBooksMenu(device: UsbDevice?) {
+        val actions = if (device != null) arrayOf("Save books from the device", "Add books to the device…")
+            else arrayOf("Add books to the device (over Wi-Fi)…")
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Books")
+            .setItems(actions) { _, which ->
+                if (device != null && which == 0) browseBooks(device)
+                else { pendingBooksDevice = device; pickBooks.launch(arrayOf("application/epub+zip", "application/pdf", "application/octet-stream", "*/*")) }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private class NewBook(val fileName: String, val bytes: ByteArray, val info: BookImport.Info)
+
+    private fun prepareBooks(device: UsbDevice?, uris: List<android.net.Uri>) {
+        val books = ArrayList<NewBook>()
+        for (uri in uris) {
+            val (name, _) = docInfo(uri)
+            val bytes = runCatching { contentResolver.openInputStream(uri)!!.use { it.readBytes() } }.getOrElse {
+                log("Can't read $name: ${it.message}"); null
+            } ?: continue
+            val info = BookImport.inspect(bytes, name)
+            if (!info.isPdf && !BookImport.isEpubZip(bytes)) { log("Skipped $name: not an EPUB or PDF."); continue }
+            books += NewBook(name, bytes, info)
+        }
+        if (books.isEmpty()) return
+        val list = books.joinToString("\n") { "• " + it.info.title + (it.info.author?.let { a -> " — $a" } ?: "") + (if (it.info.isPdf) " (PDF)" else "") }
+        val b = MaterialAlertDialogBuilder(this)
+            .setTitle("Add ${books.size} book${if (books.size == 1) "" else "s"}")
+            .setMessage("$list\n\nOver USB: copied into iBooks' library the way iTunes syncs. Close iBooks fully and reopen it to see them." +
+                "\n\nOver Wi-Fi: open the link in Safari on the device and tap \"Open in iBooks\".")
+            .setNeutralButton("Over Wi-Fi") { _, _ ->
+                shareOverWifi("Books", books.map { nb ->
+                    val ext = if (nb.info.isPdf) "pdf" else "epub"
+                    FileServer.File(IpaSaver.clean(nb.info.title) + ".$ext", if (nb.info.isPdf) "application/pdf" else "application/epub+zip",
+                        nb.bytes, nb.info.title)
+                }, "Tap a book, then \"Open in iBooks\".")
+            }
+            .setNegativeButton("Cancel", null)
+        if (device != null) b.setPositiveButton("Over USB") { _, _ -> addBooksOverUsb(device, books) }
+        b.show()
+    }
+
+    private fun addBooksOverUsb(device: UsbDevice, books: List<NewBook>) {
+        log("\nAdding ${books.size} book(s) to iBooks…")
+        runOnDevice(device) { mux, lockdown ->
+            var added = 0
+            withService(mux, lockdown, AfcClient.SERVICE) { s ->
+                val afc = AfcClient(s)
+                afc.makeDir("/Books")
+                val original = runCatching { java.io.ByteArrayOutputStream().also { afc.copyFile(BookImport.PLIST, it) }.toByteArray() }.getOrNull()
+                var plist: Any? = original?.let { runCatching { Plist.parse(it) }.getOrNull() }
+                // Keep the original list once, in case iBooks dislikes the edit.
+                if (original != null && runCatching { afc.stat(BookImport.BACKUP) }.isFailure)
+                    afc.writeFile(BookImport.BACKUP, original.inputStream(), original.size.toLong())
+                for ((i, nb) in books.withIndex()) {
+                    val label = "[${i + 1}/${books.size}] ${nb.info.title}"
+                    if (BookImport.alreadyThere(plist, nb.info)) { log("$label: already on the device, skipped"); continue }
+                    val pid = BookImport.newPersistentId()
+                    val path = "/Books/$pid." + if (nb.info.isPdf) "pdf" else "epub"
+                    try {
+                        if (nb.info.isPdf) {
+                            afc.writeFile(path, nb.bytes.inputStream(), nb.bytes.size.toLong())
+                        } else {
+                            val n = afc.unzipInto(nb.bytes.inputStream(), path, allowedTop = null)
+                            if (n == 0) throw IOException("the EPUB has no files")
+                        }
+                        val updated = BookImport.withBook(plist, nb.info, pid, nb.bytes)
+                        val xml = Plist.toXml(updated).toByteArray()
+                        afc.writeFile(BookImport.PLIST, xml.inputStream(), xml.size.toLong())
+                        plist = updated
+                        added++
+                        log("$label ✓")
+                    } catch (e: AfcException) {
+                        log("$label FAILED: ${e.message}")
+                        runCatching { afc.removeTree(path) }
+                    } catch (e: IOException) {
+                        if (e.message == "the EPUB has no files") { log("$label FAILED: ${e.message}"); runCatching { afc.removeTree(path) } } else throw e
+                    }
+                }
+            }
+            if (added > 0) {
+                runCatching { withService(mux, lockdown, NotificationProxy.SERVICE) { NotificationProxy(it).post(NotificationProxy.SYNC_DID_FINISH) } }
+                log("Done: $added added. Close iBooks fully (double-press Home, hold its icon, tap ⊖) and reopen it.")
+            } else log("Nothing added.")
+        }
     }
 
     // ---------------------------------------------------------------- clean up
@@ -3757,8 +3875,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
             log("\nLooking for leftovers on the device…")
             var archives = emptyList<Leftover>()
             var staged = emptyList<Leftover>()
+            var orphanBooks = emptyList<Leftover>()
             var partial = emptyList<Leftover>()
-            runOnDevice(device, after = { runOnUiThread { showCleanup(device, archives, staged, partial) } }) { mux, lockdown ->
+            runOnDevice(device, after = { runOnUiThread { showCleanup(device, archives, staged + orphanBooks, partial) } }) { mux, lockdown ->
                 withService(mux, lockdown, AfcClient.SERVICE) { s ->
                     val afc = AfcClient(s)
                     fun scan(dir: String, filter: (String) -> Boolean) =
@@ -3771,6 +3890,13 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         }
                     archives = scan("/ApplicationArchives") { it.endsWith(".zip") }
                     staged = scan("/PublicStaging") { true }
+                    // Book copies cut off before their Books.plist entry was written (Books › Add over USB).
+                    val listed = runCatching {
+                        BookImport.entries(Plist.parse(java.io.ByteArrayOutputStream().also { afc.copyFile(BookImport.PLIST, it) }.toByteArray()))
+                            .mapNotNull { (it["Path"] as? String)?.substringAfterLast('/') }.toSet()
+                    }.getOrNull()
+                    if (listed != null) orphanBooks = scan("/Books") { it.matches(BOOK_COPY) && it !in listed }
+                        .map { Leftover("../Books/" + it.name, it.size) }
                 }
                 // An upload cut off mid-copy. It may have been written through AFC2 (whole filesystem).
                 prefs.getString(PREF_PARTIAL_UPLOAD, null)?.let { saved ->
@@ -3803,8 +3929,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val groups = LinkedHashMap<String, Group>()
         if (archives.isNotEmpty()) groups["archives"] = group("Leftover app archives on the device", archives.size, archives.sumOf { it.size },
             archives.joinToString("\n") { "• " + it.name })
-        if (staged.isNotEmpty()) groups["staged"] = group("Unfinished installs on the device", staged.size, staged.sumOf { it.size },
-            staged.joinToString("\n") { "• " + it.name })
+        if (staged.isNotEmpty()) groups["staged"] = group("Unfinished installs and book copies on the device", staged.size, staged.sumOf { it.size },
+            staged.joinToString("\n") { "• " + if (it.name.startsWith("../")) "Books/" + it.name.substringAfterLast('/') + " (not in iBooks' list)" else it.name })
         if (partial.isNotEmpty()) groups["partial"] = group("Partly uploaded file on the device", 1, partial[0].size, "• " + partial[0].name.substringAfter(':') +
             if (partial[0].name.startsWith("afc:")) "  (in the Media folder)" else "")
         if (pending.isNotEmpty()) groups["pending"] = group("Unfinished saves on this phone", pending.size, pending.sumOf { it.size },
@@ -3895,7 +4021,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 if (staged.isNotEmpty()) {
                     var n = 0
                     for (st in staged) {
-                        if (runCatching { afc.removeTree("/PublicStaging/${st.name}") }.isSuccess) n++ else log("  couldn't delete ${st.name}")
+                        if (runCatching { afc.removeTree(if (st.name.startsWith("../")) st.name.removePrefix("..") else "/PublicStaging/${st.name}") }.isSuccess) n++ else log("  couldn't delete ${st.name}")
                     }
                     log("Deleted $n unfinished install${if (n == 1) "" else "s"} (${humanSize(staged.sumOf { it.size })}) ✓")
                 }
@@ -3920,6 +4046,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun appVersion(): String = runCatching {
         "v" + packageManager.getPackageInfo(packageName, 0).versionName
     }.getOrDefault("")
+
+    /** Saves the activity log to Download/IPA Backup/Logs/log-yyyy-MM-dd-HH-mm-ss.txt. */
+    private fun saveLog() {
+        val name = "log-" + java.text.SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", java.util.Locale.US).format(java.util.Date()) + ".txt"
+        runCatching { saveBytes(name, LOGS_SUBFOLDER, (ui.log.joinToString("\n") + "\n").toByteArray()) }
+            .onSuccess { Toast.makeText(this, "Saved to $it", Toast.LENGTH_SHORT).show() }
+            .onFailure { log("Saving the log FAILED: ${it.message}") }
+    }
 
     private fun copyLog() {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

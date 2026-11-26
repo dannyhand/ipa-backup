@@ -5,13 +5,13 @@ import java.util.zip.ZipInputStream
 
 /**
  * Writes a zip's entries onto the device under [destRoot] (e.g. an app's sandbox via house_arrest).
- * Entries whose top-level folder isn't in [allowedTop], and any path trying to escape with "..", are skipped.
+ * Entries whose top-level folder isn't in [allowedTop] (null = allow all), and any path trying to escape with "..", are skipped.
  * Existing files are overwritten; files not in the zip are left alone. Returns the number of files written.
  */
 fun AfcClient.unzipInto(
     zip: InputStream,
     destRoot: String,
-    allowedTop: Set<String>,
+    allowedTop: Set<String>?,
     onFile: (String) -> Unit = {},
 ): Int {
     val made = HashSet<String>()
@@ -28,7 +28,7 @@ fun AfcClient.unzipInto(
             val e = z.nextEntry ?: break
             val name = e.name.replace('\\', '/').trimStart('/')
             val parts = name.split('/').filter { it.isNotEmpty() }
-            if (parts.isEmpty() || parts.any { it == ".." || it == "." } || parts[0] !in allowedTop) continue
+            if (parts.isEmpty() || parts.any { it == ".." || it == "." } || (allowedTop != null && parts[0] !in allowedTop)) continue
             val target = "$root/" + parts.joinToString("/")
             if (e.isDirectory) {
                 ensureDir(target)

@@ -23,7 +23,10 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
   their app data, or restore just the app data into apps that are already installed. App Store apps need
   the Apple ID that bought them, or a jailbroken device with AppSync.
 - **Clean up:** finds and deletes leftovers from interrupted transfers: app archives, unfinished
-  installs and partly uploaded files on the device, unfinished saves and temporary files on the phone
+  installs, partly uploaded files and half-copied books on the device, unfinished saves and temporary files on the phone
+- **Add books** (EPUB or PDF) to iBooks: over USB, copied in like an iTunes sync, or over Wi-Fi via Safari's
+  "Open in iBooks"
+- **Save the activity log** to Download/IPA Backup/Logs
 - **Uninstall apps**, with a warning for any that aren't backed up
 - **Auto-backup:** optionally backs up new or updated apps as soon as the device is plugged in
 - **Device info:** model, iOS, serial, storage, battery charge and health (cycle count and capacity where

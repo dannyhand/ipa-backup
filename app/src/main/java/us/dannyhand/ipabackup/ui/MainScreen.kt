@@ -25,6 +25,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.PhoneIphone
 import androidx.compose.material.icons.outlined.Usb
@@ -90,6 +91,7 @@ fun MainScreen(
     sectionNotes: Map<String, String>,
     onCopyLog: () -> Unit,
     onClearLog: () -> Unit,
+    onSaveLog: () -> Unit = {},
     onStop: () -> Unit,
 ) {
     Scaffold(
@@ -130,7 +132,7 @@ fun MainScreen(
                     }
                 }
             }
-            item { ActivityLog(state, onCopyLog, onClearLog, Modifier.height(320.dp)) }
+            item { ActivityLog(state, onCopyLog, onClearLog, onSaveLog, Modifier.height(320.dp)) }
         }
     }
 }
@@ -254,7 +256,7 @@ private fun FeatureTile(f: Feature, enabled: Boolean, modifier: Modifier) {
 }
 
 @Composable
-private fun ActivityLog(state: UiState, onCopy: () -> Unit, onClear: () -> Unit, modifier: Modifier) {
+private fun ActivityLog(state: UiState, onCopy: () -> Unit, onClear: () -> Unit, onSave: () -> Unit, modifier: Modifier) {
     Card(
         modifier
             .fillMaxWidth()
@@ -263,6 +265,7 @@ private fun ActivityLog(state: UiState, onCopy: () -> Unit, onClear: () -> Unit,
     ) {
         Row(Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Activity", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            IconButton(onClick = onSave) { Icon(Icons.Outlined.Save, contentDescription = "Save log to Downloads") }
             IconButton(onClick = onCopy) { Icon(Icons.Outlined.ContentCopy, contentDescription = "Copy log") }
             IconButton(onClick = onClear) { Icon(Icons.Outlined.DeleteSweep, contentDescription = "Clear log") }
         }

@@ -12,6 +12,7 @@ import org.robolectric.annotation.Config
 import us.dannyhand.ipabackup.device.DeviceReport
 import us.dannyhand.ipabackup.device.HomeScreen
 import us.dannyhand.ipabackup.jailbreak.Dpkg
+import us.dannyhand.ipabackup.media.BookImport
 import us.dannyhand.ipabackup.personal.CallHistory
 import us.dannyhand.ipabackup.personal.CallHistoryHtml
 import us.dannyhand.ipabackup.personal.ContactNames
@@ -186,5 +187,48 @@ class HomeScreenTest {
         assertNotNull(Plist.toXml(back))
         assertFalse(HomeScreen.looksValid(mapOf("a" to 1)))
         assertFalse(HomeScreen.looksValid(listOf("x")))
+    }
+}
+
+class BookImportTest {
+    private fun epub(opf: String, containerPath: String = "OEBPS/content.opf"): ByteArray {
+        val bos = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(bos).use { z ->
+            fun put(n: String, t: String) { z.putNextEntry(java.util.zip.ZipEntry(n)); z.write(t.toByteArray()); z.closeEntry() }
+            put("mimetype", "application/epub+zip")
+            put("META-INF/container.xml", "<container><rootfiles><rootfile full-path=\"$containerPath\" media-type=\"application/oebps-package+xml\"/></rootfiles></container>")
+            put(containerPath, opf)
+            put("OEBPS/ch1.xhtml", "<html/>")
+        }
+        return bos.toByteArray()
+    }
+
+    @Test fun readsTitleAndAuthor() {
+        val b = epub("<package><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>Pride &amp; Prejudice</dc:title>" +
+            "<dc:creator opf:role=\"aut\">Jane Austen</dc:creator></metadata></package>")
+        val i = BookImport.inspect(b, "pp.epub")
+        assertEquals("Pride & Prejudice", i.title); assertEquals("Jane Austen", i.author); assertFalse(i.isPdf)
+        assertTrue(BookImport.isEpubZip(b))
+    }
+
+    @Test fun fallsBackToFileNameAndDetectsPdf() {
+        assertEquals("My Book", BookImport.inspect(epub("<package/>"), "My Book.epub").title)
+        val pdf = BookImport.inspect("%PDF-1.4 ...".toByteArray(), "manual.pdf")
+        assertTrue(pdf.isPdf); assertEquals("manual", pdf.title)
+    }
+
+    @Test fun addsEntryKeepingExisting() {
+        val existing = mapOf("Books" to listOf(mapOf("Name" to "Old", "Artist" to "A", "Path" to "1.epub")), "Other" to 1L)
+        val info = BookImport.Info("New", "B", false)
+        assertFalse(BookImport.alreadyThere(existing, info))
+        val pid = BookImport.newPersistentId(kotlin.random.Random(1))
+        assertTrue(pid.matches(Regex("[0-9A-F]{16}")))
+        val out = BookImport.withBook(existing, info, pid, byteArrayOf(1, 2, 3))
+        val books = out["Books"] as List<*>
+        assertEquals(2, books.size); assertEquals(1L, out["Other"])
+        val e = books[1] as Map<*, *>
+        assertEquals("$pid.epub", e["Path"]); assertEquals("New", e["Name"]); assertEquals("B", e["Artist"])
+        assertTrue(BookImport.alreadyThere(out, info))
+        assertEquals(1, (BookImport.withBook(null, info, pid, byteArrayOf())["Books"] as List<*>).size)
     }
 }
