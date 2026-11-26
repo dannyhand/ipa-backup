@@ -2,6 +2,7 @@ package us.dannyhand.ipabackup
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Contacts
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Forum
@@ -38,6 +39,7 @@ class MainScreenShotTest {
         Feature("Messages", Icons.Outlined.Forum, "Personal data", needsJailbreak = true) {},
         Feature("Contacts & Notes", Icons.Outlined.Contacts, "Personal data", needsJailbreak = true) {},
         Feature("Files", Icons.Outlined.FolderOpen, "Tools") {},
+        Feature("Clean up", Icons.Outlined.CleaningServices, "Tools") {},
     )
     private val notes = mapOf("Personal data" to "needs a jailbroken device with AFC2")
 

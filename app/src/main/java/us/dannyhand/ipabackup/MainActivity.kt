@@ -77,6 +77,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Contacts
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Forum
@@ -185,6 +186,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             Feature("Messages", Icons.Outlined.Forum, "Personal data", needsJailbreak = true) { withDevice(::exportMessages) },
             Feature("Contacts & Notes", Icons.Outlined.Contacts, "Personal data", needsJailbreak = true) { withDevice(::exportPersonalData) },
             Feature("Files", Icons.Outlined.FolderOpen, "Tools") { withDevice(::browseFiles) },
+            Feature("Clean up", Icons.Outlined.CleaningServices, "Tools") { startCleanup() },
         )
         val notes = mapOf("Personal data" to "needs a jailbroken device with AFC2")
         setContent {
@@ -2955,6 +2957,156 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         (if (restoreData) ", $datas data restores" else "") +
                         (if (stopped && done < items.size) ", ${items.size - done} not installed" else "") +
                         (if (failed.isEmpty()) "." else "\nFailed: ${failed.joinToString()}"))
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- clean up
+
+    /** A leftover on the device: name and size. */
+    private class Leftover(val name: String, val size: Long)
+
+    /**
+     * Finds what an interrupted run can leave behind (e.g. the OTG cable coming out mid-copy):
+     *  - device: .zip files in ApplicationArchives (made by Archive, normally deleted right after copying) and
+     *    PublicStaging contents (an .ipa uploaded by Restore, normally deleted after installing)
+     *  - phone: unfinished (still pending) saves, and temporary working files in the app cache
+     * Without a device connected, only the phone side is checked.
+     */
+    private fun startCleanup() {
+        if (busy) { log("Busy, please wait for the current operation to finish."); return }
+        val connected = usbManager.deviceList.values.any { AppleUsbTransport.isApple(it) && AppleUsbTransport.findMuxInterface(it) != null }
+        if (!connected) {
+            log("\nNo device connected: checking this phone only.")
+            showCleanup(null, emptyList(), emptyList())
+            return
+        }
+        withDevice { device ->
+            log("\nLooking for leftovers on the device…")
+            var archives = emptyList<Leftover>()
+            var staged = emptyList<Leftover>()
+            runOnDevice(device, after = { runOnUiThread { showCleanup(device, archives, staged) } }) { mux, lockdown ->
+                withService(mux, lockdown, AfcClient.SERVICE) { s ->
+                    val afc = AfcClient(s)
+                    fun scan(dir: String, filter: (String) -> Boolean) =
+                        runCatching { afc.readDir(dir) }.getOrDefault(emptyList()).filter(filter).map { n ->
+                            val path = "$dir/$n"
+                            Leftover(n, runCatching {
+                                val e = afc.stat(path)
+                                if (e.isDir) afc.measureTree(path).bytes else e.size
+                            }.getOrDefault(0L))
+                        }
+                    archives = scan("/ApplicationArchives") { it.endsWith(".zip") }
+                    staged = scan("/PublicStaging") { true }
+                }
+            }
+        }
+    }
+
+    /** Temporary working files (database copies, previews, staging). Thumbnails are a useful cache, so they stay. */
+    private fun tempFiles(): List<java.io.File> = cacheDir.listFiles()?.filter { it.name != "thumbs" } ?: emptyList()
+
+    private fun dirSize(f: java.io.File): Long = if (f.isDirectory) f.listFiles()?.sumOf { dirSize(it) } ?: 0L else f.length()
+
+    private fun showCleanup(device: UsbDevice?, archives: List<Leftover>, staged: List<Leftover>) {
+        val saver = IpaSaver(this)
+        val pending = saver.listPending()
+        val temp = tempFiles()
+        val tempSize = temp.sumOf { dirSize(it) }
+        val pad = (20 * resources.displayMetrics.density).toInt()
+
+        class Group(val box: MaterialCheckBox, val detail: String)
+        fun group(title: String, count: Int, size: Long, detail: String) =
+            Group(MaterialCheckBox(this).apply { text = "$title: $count (${humanSize(size)})"; isChecked = true }, detail)
+
+        val groups = LinkedHashMap<String, Group>()
+        if (archives.isNotEmpty()) groups["archives"] = group("Leftover app archives on the device", archives.size, archives.sumOf { it.size },
+            archives.joinToString("\n") { "• " + it.name })
+        if (staged.isNotEmpty()) groups["staged"] = group("Unfinished installs on the device", staged.size, staged.sumOf { it.size },
+            staged.joinToString("\n") { "• " + it.name })
+        if (pending.isNotEmpty()) groups["pending"] = group("Unfinished saves on this phone", pending.size, pending.sumOf { it.size },
+            pending.joinToString("\n") { "• " + it.name })
+        if (tempSize > 0) groups["temp"] = group("Temporary files on this phone", temp.size, tempSize,
+            "Database copies, previews and staging files. Thumbnails are kept.")
+
+        if (groups.isEmpty()) {
+            log("Nothing to clean up" + if (device == null) " on this phone." else ".")
+            MaterialAlertDialogBuilder(this)
+                .setTitle("All clean")
+                .setMessage(if (device == null) "Nothing left over on this phone. Connect the device to check it too."
+                    else "Nothing left over on the device or this phone.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            if (device == null) addView(TextView(this@MainActivity).apply {
+                text = "No device connected, so only this phone was checked."
+                textSize = 13f
+                alpha = 0.8f
+            })
+            for (g in groups.values) {
+                addView(g.box)
+                addView(TextView(this@MainActivity).apply {
+                    text = g.detail
+                    textSize = 12f
+                    alpha = 0.7f
+                    maxLines = 6
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(pad * 2, 0, 0, pad / 2)
+                })
+            }
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Clean up")
+            .setView(android.widget.ScrollView(this).apply { addView(body) })
+            .setPositiveButton("Delete selected") { _, _ ->
+                fun on(key: String) = groups[key]?.box?.isChecked == true
+                runCleanup(device, if (on("archives")) archives else emptyList(), if (on("staged")) staged else emptyList(),
+                    if (on("pending")) pending else emptyList(), on("temp"))
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun runCleanup(device: UsbDevice?, archives: List<Leftover>, staged: List<Leftover>, pending: List<IpaSaver.Saved>, temp: Boolean) {
+        // Phone side first: quick and needs no connection.
+        if (pending.isNotEmpty()) {
+            val saver = IpaSaver(this)
+            val n = pending.count { saver.delete(it.uri) }
+            log("Deleted $n unfinished save${if (n == 1) "" else "s"} on this phone.")
+        }
+        if (temp) {
+            val freed = tempFiles().sumOf { f -> dirSize(f).also { f.deleteRecursively() } }
+            log("Deleted temporary files (${humanSize(freed)}).")
+        }
+        if (device == null || (archives.isEmpty() && staged.isEmpty())) return
+        log("\nCleaning up the device…")
+        runOnDevice(device) { mux, lockdown ->
+            withService(mux, lockdown, AfcClient.SERVICE) { s ->
+                val afc = AfcClient(s)
+                if (archives.isNotEmpty()) {
+                    // Prefer installation_proxy's RemoveArchive (it owns ApplicationArchives); AFC delete as a fallback.
+                    withService(mux, lockdown, InstallationProxy.SERVICE) { ipStream ->
+                        val ip = InstallationProxy(ipStream)
+                        var n = 0
+                        for (a in archives) {
+                            val ok = runCatching { ip.removeArchive(a.name.removeSuffix(".zip")) }.isSuccess ||
+                                runCatching { afc.removeTree("/ApplicationArchives/${a.name}") }.isSuccess
+                            if (ok) n++ else log("  couldn't delete ${a.name}")
+                        }
+                        log("Deleted $n leftover app archive${if (n == 1) "" else "s"} (${humanSize(archives.sumOf { it.size })}) ✓")
+                    }
+                }
+                if (staged.isNotEmpty()) {
+                    var n = 0
+                    for (st in staged) {
+                        if (runCatching { afc.removeTree("/PublicStaging/${st.name}") }.isSuccess) n++ else log("  couldn't delete ${st.name}")
+                    }
+                    log("Deleted $n unfinished install${if (n == 1) "" else "s"} (${humanSize(staged.sumOf { it.size })}) ✓")
                 }
             }
         }

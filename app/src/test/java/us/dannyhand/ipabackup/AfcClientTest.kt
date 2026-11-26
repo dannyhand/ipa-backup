@@ -18,7 +18,10 @@ import kotlin.random.Random
 class FakeAfcDevice(initial: Map<String, ByteArray>) : ByteConnection {
     /** Files on the fake device; tests can inspect what was written. */
     val files = LinkedHashMap(initial)
-    val dirs = HashSet<String>()
+    /** Folders exist on their own (like on the device), starting with every parent of the initial files. */
+    val dirs = HashSet<String>().apply {
+        for (f in initial.keys) { var d = f.substringBeforeLast('/', ""); while (d.isNotEmpty()) { add(d); d = d.substringBeforeLast('/', "") } }
+    }
     private val reply = java.util.ArrayDeque<Byte>()
     private val openFiles = HashMap<Long, Pair<ByteArray, Int>>()
     private val writeHandles = HashMap<Long, String>()
@@ -74,7 +77,15 @@ class FakeAfcDevice(initial: Map<String, ByteArray>) : ByteConnection {
                 for (part in path(0).trim('/').split('/')) { d += "/$part"; dirs += d } // mkdir -p
                 status(0)
             }
-            AfcClient.OP_REMOVE_PATH -> if (files.remove(path(0)) != null || dirs.remove(path(0).trimEnd('/'))) status(0) else status(8)
+            AfcClient.OP_REMOVE_PATH -> {
+                val target = path(0).trimEnd('/')
+                when {
+                    files.remove(target) != null -> status(0)
+                    target in dirs && (files.keys + dirs).any { it.startsWith("$target/") } -> status(1) // not empty
+                    dirs.remove(target) -> status(0)
+                    else -> status(8)
+                }
+            }
             AfcClient.OP_FILE_READ -> {
                 val h = p.getLong(0); val len = p.getLong(8).toInt()
                 val (bytes, pos) = openFiles.getValue(h)
@@ -261,5 +272,23 @@ class AfcWriteTest {
         assertArrayEquals(exact, device.files["/A/B/C/x.bin"])
         afc.writeFile("/A/B/C/empty.bin", ByteArray(0).inputStream())
         assertEquals(0, device.files["/A/B/C/empty.bin"]!!.size)
+    }
+}
+
+class AfcRemoveTreeTest {
+    @Test
+    fun removesNestedFolderAndLeavesNeighbours() {
+        val device = FakeAfcDevice(mapOf(
+            "/PublicStaging/game.ipa/Payload/Game.app/Game" to ByteArray(10),
+            "/PublicStaging/game.ipa/iTunesMetadata.plist" to ByteArray(3),
+            "/PublicStaging/other.ipa" to ByteArray(5),
+            "/ApplicationArchives/com.x.zip" to ByteArray(7),
+        ))
+        val afc = AfcClient(device)
+        assertEquals(2, afc.removeTree("/PublicStaging/game.ipa"))
+        assertEquals(1, afc.removeTree("/PublicStaging/other.ipa"))
+        assertEquals(setOf("/ApplicationArchives/com.x.zip"), device.files.keys)
+        assertTrue("/PublicStaging/game.ipa" !in device.dirs) // folder itself removed
+        assertTrue("/PublicStaging" in device.dirs)           // parent kept
     }
 }

@@ -144,6 +144,19 @@ class AfcClient(private val conn: ByteConnection) {
         receive()
     }
 
+    /** Deletes a file, or a folder and everything in it. Returns the number of files removed. */
+    fun removeTree(path: String): Int {
+        val e = stat(path)
+        var n = 0
+        if (e.isDir) {
+            for (name in readDir(path)) n += removeTree(if (path.endsWith("/")) path + name else "$path/$name")
+        } else {
+            n = 1
+        }
+        remove(path)
+        return n
+    }
+
     /** Uploads [input] to [path] (created or truncated). [progress] gets (bytesWritten, [total]). */
     fun writeFile(path: String, input: java.io.InputStream, total: Long = -1, progress: (Long, Long) -> Unit = { _, _ -> }): Long {
         cancelCheck()

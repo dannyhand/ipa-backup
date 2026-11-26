@@ -102,6 +102,40 @@ class IpaSaver(private val context: Context) {
         return out
     }
 
+    /**
+     * Saves this app left unfinished (still IS_PENDING, e.g. the cable came out mid-copy), anywhere under
+     * Download/IPA Backup/. Android deletes stale pending files itself after about a week; this lets the
+     * user clear them now. Android 10+ only (older versions write straight to app storage).
+     */
+    fun listPending(): List<Saved> {
+        if (Build.VERSION.SDK_INT < 29) return emptyList()
+        val out = ArrayList<Saved>()
+        val projection = arrayOf(MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME, MediaStore.Downloads.SIZE,
+            MediaStore.Downloads.DATE_MODIFIED, MediaStore.Downloads.RELATIVE_PATH)
+        val selection = "${MediaStore.Downloads.IS_PENDING} = 1 AND ${MediaStore.Downloads.RELATIVE_PATH} LIKE ?"
+        val args = arrayOf("${Environment.DIRECTORY_DOWNLOADS}/$FOLDER/%")
+        val cursor = if (Build.VERSION.SDK_INT >= 30) {
+            context.contentResolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, android.os.Bundle().apply {
+                putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                putStringArray(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args)
+                putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+            }, null)
+        } else {
+            @Suppress("DEPRECATION")
+            context.contentResolver.query(MediaStore.setIncludePending(MediaStore.Downloads.EXTERNAL_CONTENT_URI), projection, selection, args, null)
+        }
+        cursor?.use { c ->
+            while (c.moveToNext()) {
+                val rel = c.getString(4).orEmpty().removePrefix("${Environment.DIRECTORY_DOWNLOADS}/")
+                out += Saved(rel + (c.getString(1) ?: "?"), ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0)),
+                    c.getLong(2), c.getLong(3) * 1000)
+            }
+        }
+        return out
+    }
+
+    fun delete(uri: Uri): Boolean = runCatching { context.contentResolver.delete(uri, null, null) > 0 }.getOrDefault(false)
+
     private fun findUris(fileName: String, sub: String?): List<Uri> {
         val uris = mutableListOf<Uri>()
         context.contentResolver.query(
