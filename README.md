@@ -24,6 +24,17 @@ Built to rescue App Store games that are long gone from the store, from an iPod 
   the Apple ID that bought them, or a jailbroken device with AppSync.
 - **Clean up:** finds and deletes leftovers from interrupted transfers: app archives, unfinished
   installs and partly uploaded files on the device, unfinished saves and temporary files on the phone
+- **Uninstall apps**, with a warning for any that aren't backed up
+- **Auto-backup:** optionally backs up new or updated apps as soon as the device is plugged in
+- **Device info:** model, iOS, serial, storage, battery charge and health (cycle count and capacity where
+  iOS reports them), jailbreak status, saved as text
+- **Power:** restart, shut down or sleep the device
+- **Home screen:** save the icon and folder layout and restore it later; save the wallpapers as PNG
+  (lock screen wallpaper needs AFC2)
+- **System log:** live device console with a filter, saveable as text
+- **Crash reports:** browse and save the device's crash logs
+- **Cydia packages** (AFC2): installed tweaks and repos as HTML plus a plain list for reinstalling
+- **Safari and call history** (AFC2): added to the Contacts & Notes export as readable HTML
 - **Root certificates:** fixes Safari's "certificate for this server is invalid" on old iOS by installing a
   profile of current root certificates (Let's Encrypt, Google, DigiCert, Sectigo and others), over USB or
   from Safari over Wi-Fi. Also warns if the device's date is wrong, which causes the same error.

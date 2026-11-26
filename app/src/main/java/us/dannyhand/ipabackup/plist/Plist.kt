@@ -42,10 +42,14 @@ object Plist {
             is Boolean -> sb.append(if (v) "<true/>\n" else "<false/>\n")
             is Int, is Long, is Short, is java.math.BigInteger -> sb.append("<integer>").append(v).append("</integer>\n")
             is Float, is Double -> sb.append("<real>").append(v).append("</real>\n")
+            is java.util.Date -> sb.append("<date>").append(isoDate().format(v)).append("</date>\n")
             is ByteArray -> sb.append("<data>").append(Base64.encodeToString(v, Base64.NO_WRAP)).append("</data>\n")
             else -> throw IllegalArgumentException("Unsupported plist type: ${v::class.java}")
         }
     }
+
+    private fun isoDate() = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+        .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
 
     private fun escape(s: String) =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -77,7 +81,9 @@ object Plist {
             while (p.nextTag() == XmlPullParser.START_TAG) l += readValue(p)
             l
         }
-        "string", "date" -> p.nextText()
+        "string" -> p.nextText()
+        // Dates come back as java.util.Date (like the binary parser), so writing a plist back keeps them dates.
+        "date" -> p.nextText().let { t -> runCatching { isoDate().parse(t) }.getOrNull() ?: t }
         "integer" -> p.nextText().trim().let { it.toLongOrNull() ?: it.toBigInteger() }
         "real" -> p.nextText().trim().toDouble()
         "true" -> { p.nextTag(); true }

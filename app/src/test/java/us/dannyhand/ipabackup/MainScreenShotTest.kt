@@ -2,7 +2,15 @@ package us.dannyhand.ipabackup
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.CleaningServices
+import androidx.compose.material.icons.outlined.Dashboard
+import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.PowerSettingsNew
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Contacts
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Forum
@@ -31,15 +39,23 @@ class MainScreenShotTest {
     private val features = listOf(
         Feature("Back up apps", Icons.Outlined.Apps, "Apps") {},
         Feature("Restore", Icons.Outlined.InstallMobile, "Apps") {},
+        Feature("Uninstall", Icons.Outlined.DeleteSweep, "Apps") {},
         Feature("Music", Icons.Outlined.LibraryMusic, "Media") {},
         Feature("Photos", Icons.Outlined.PhotoLibrary, "Media") {},
         Feature("Other media", Icons.Outlined.Podcasts, "Media") {},
         Feature("Voice Memos", Icons.Outlined.Mic, "Media") {},
         Feature("Books", Icons.Outlined.MenuBook, "Media") {},
         Feature("Messages", Icons.Outlined.Forum, "Personal data", needsJailbreak = true) {},
-        Feature("Contacts & Notes", Icons.Outlined.Contacts, "Personal data", needsJailbreak = true) {},
+        Feature("Contacts, Notes & more", Icons.Outlined.Contacts, "Personal data", needsJailbreak = true) {},
+        Feature("Cydia packages", Icons.Outlined.Extension, "Personal data", needsJailbreak = true) {},
+        Feature("Device info", Icons.Outlined.Info, "Device") {},
+        Feature("Power", Icons.Outlined.PowerSettingsNew, "Device") {},
+        Feature("Home screen", Icons.Outlined.Dashboard, "Device") {},
+        Feature("System log", Icons.Outlined.Terminal, "Device") {},
+        Feature("Crash reports", Icons.Outlined.BugReport, "Device") {},
         Feature("Files", Icons.Outlined.FolderOpen, "Tools") {},
         Feature("Clean up", Icons.Outlined.CleaningServices, "Tools") {},
+        Feature("Certificates", Icons.Outlined.VerifiedUser, "Tools") {},
     )
     private val notes = mapOf("Personal data" to "needs a jailbroken device with AFC2")
 

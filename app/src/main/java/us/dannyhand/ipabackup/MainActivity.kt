@@ -34,6 +34,12 @@ import android.widget.Toast
 import us.dannyhand.ipabackup.afc.AfcClient
 import us.dannyhand.ipabackup.afc.AfcException
 import us.dannyhand.ipabackup.certs.McInstall
+import us.dannyhand.ipabackup.device.DeviceReport
+import us.dannyhand.ipabackup.device.HomeScreen
+import us.dannyhand.ipabackup.diag.DiagnosticsRelay
+import us.dannyhand.ipabackup.jailbreak.Dpkg
+import us.dannyhand.ipabackup.util.CpBitmap
+import us.dannyhand.ipabackup.util.CgbiPng
 import us.dannyhand.ipabackup.certs.ProfileServer
 import us.dannyhand.ipabackup.certs.RootProfile
 import us.dannyhand.ipabackup.afc.AfcZipper
@@ -71,6 +77,9 @@ import us.dannyhand.ipabackup.personal.NotesDb
 import us.dannyhand.ipabackup.personal.NotesExport
 import us.dannyhand.ipabackup.personal.SafariBookmarks
 import us.dannyhand.ipabackup.personal.VCard
+import us.dannyhand.ipabackup.personal.SafariHistory
+import us.dannyhand.ipabackup.personal.CallHistory
+import us.dannyhand.ipabackup.personal.CallHistoryHtml
 import us.dannyhand.ipabackup.plist.Plist
 import us.dannyhand.ipabackup.usb.AppleUsbTransport
 import us.dannyhand.ipabackup.ui.Feature
@@ -81,7 +90,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.CleaningServices
+import androidx.compose.material.icons.outlined.Dashboard
+import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.PowerSettingsNew
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.outlined.Contacts
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -140,6 +156,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
         const val MEMOS_SUBFOLDER = "Voice Memos"
         const val BOOKS_SUBFOLDER = "Books"
         const val PERSONAL_SUBFOLDER = "Personal"
+        const val CRASH_SUBFOLDER = "Crash Reports"
         const val THUMB_PX = 200
         /** Formats we can write song info into (DRM .m4p is left untouched). */
         val TAGGABLE = setOf("m4a", "m4b", "m4r", "aac", "mp3")
@@ -185,13 +202,20 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val features = listOf(
             Feature("Back up apps", Icons.Outlined.Apps, "Apps") { withDevice(::probe) },
             Feature("Restore", Icons.Outlined.InstallMobile, "Apps") { withDevice(::showRestorePicker) },
+            Feature("Uninstall", Icons.Outlined.DeleteSweep, "Apps") { withDevice(::startUninstall) },
             Feature("Music", Icons.Outlined.LibraryMusic, "Media") { withDevice { d -> browseMusic(d, otherMedia = false) } },
             Feature("Photos", Icons.Outlined.PhotoLibrary, "Media") { withDevice(::browsePhotos) },
             Feature("Other media", Icons.Outlined.Podcasts, "Media") { withDevice { d -> browseMusic(d, otherMedia = true) } },
             Feature("Voice Memos", Icons.Outlined.Mic, "Media") { withDevice(::browseVoiceMemos) },
             Feature("Books", Icons.Outlined.MenuBook, "Media") { withDevice(::browseBooks) },
             Feature("Messages", Icons.Outlined.Forum, "Personal data", needsJailbreak = true) { withDevice(::exportMessages) },
-            Feature("Contacts & Notes", Icons.Outlined.Contacts, "Personal data", needsJailbreak = true) { withDevice(::exportPersonalData) },
+            Feature("Contacts, Notes & more", Icons.Outlined.Contacts, "Personal data", needsJailbreak = true) { withDevice(::exportPersonalData) },
+            Feature("Cydia packages", Icons.Outlined.Extension, "Personal data", needsJailbreak = true) { withDevice(::exportCydia) },
+            Feature("Device info", Icons.Outlined.Info, "Device") { withDevice(::showDeviceInfo) },
+            Feature("Power", Icons.Outlined.PowerSettingsNew, "Device") { withDevice(::showPower) },
+            Feature("Home screen", Icons.Outlined.Dashboard, "Device") { withDevice(::showHomeScreen) },
+            Feature("System log", Icons.Outlined.Terminal, "Device") { withDevice(::showSyslog) },
+            Feature("Crash reports", Icons.Outlined.BugReport, "Device") { withDevice(::browseCrashReports) },
             Feature("Files", Icons.Outlined.FolderOpen, "Tools") { withDevice(::browseFiles) },
             Feature("Clean up", Icons.Outlined.CleaningServices, "Tools") { startCleanup() },
             Feature("Certificates", Icons.Outlined.VerifiedUser, "Tools") { startCertificates() },
@@ -236,7 +260,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
     private fun handleIntent(intent: Intent?) {
         if (intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
             // Launched from the attach dialog: permission is already granted for this device.
-            intent.usbDevice()?.let { probe(it) }
+            intent.usbDevice()?.let { if (prefs.getBoolean("auto_backup", false)) autoBackup(it) else probe(it) }
         }
     }
 
@@ -274,6 +298,9 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val deviceName: String = runCatching { client.getValue("DeviceName") as String }.getOrDefault("iPod")
         val productVersion: String? = runCatching { client.getValue("ProductVersion") as String }.getOrNull()
 
+        /** A lockdown value (null key = the whole domain), or null if it can't be read. */
+        fun value(key: String?, domain: String?): Any? = runCatching { client.getValue(key, domain) }.getOrNull()
+
         /** The device clock, in seconds since 1970, or null if it won't say. */
         fun deviceTime(): Long? = runCatching { (client.getValue("TimeIntervalSince1970") as Number).toLong() }.getOrNull()
 
@@ -302,7 +329,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         }
 
         fun close() {
-            client.stopSession()
+            // Tolerant: after Restart/Shutdown (or a pulled cable) the device is already gone.
+            runCatching { client.stopSession() }
             runCatching { stream.close() }
         }
     }
@@ -454,6 +482,14 @@ class MainActivity : androidx.activity.ComponentActivity() {
             text = "Also back up app data (saves, settings) as a separate .zip"
             isChecked = prefs.getBoolean("include_data", false)
         }
+        val autoBox = MaterialCheckBox(this).apply {
+            text = "Back up new apps automatically when the device is plugged in"
+            isChecked = prefs.getBoolean("auto_backup", false)
+            setOnCheckedChangeListener { _, on ->
+                prefs.edit().putBoolean("auto_backup", on).apply()
+                if (on) Toast.makeText(this@MainActivity, "When Android asks which app to open for this device, pick IPA Backup and tick Always.", Toast.LENGTH_LONG).show()
+            }
+        }
         val iconCache = IconCache(this)
         val iconPx = (40 * resources.displayMetrics.density).toInt()
         var showIcons = prefs.getBoolean("show_icons", false)
@@ -499,6 +535,7 @@ class MainActivity : androidx.activity.ComponentActivity() {
             addView(skipBox)
             addView(dataBox)
             addView(iconBox)
+            addView(autoBox)
             addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.5).toInt()))
         }
 
@@ -2170,12 +2207,15 @@ class MainActivity : androidx.activity.ComponentActivity() {
         pick: (T) -> Pick,
         saveOne: (AfcClient, IpaSaver, T, MutableSet<String>) -> String,
         confirmNote: (List<T>) -> String? = { null },
+        service: String = AfcClient.SERVICE,
+        prepare: (UsbMux, DeviceSession) -> Unit = { _, _ -> },
     ) {
         log("\nReading $what…")
         val cmds = LinkedBlockingQueue<PickCmd>()
         val selected = HashSet<String>()
         runOnDevice(device, after = { setStopButtonVisible(false); stopMode = StopMode.NONE }) { mux, lockdown ->
-            withService(mux, lockdown, AfcClient.SERVICE) { stream ->
+            prepare(mux, lockdown)
+            withService(mux, lockdown, service) { stream ->
                 val afc = AfcClient(stream)
                 val items = load(afc)
                 if (items.isEmpty()) { log("No $what found on the iPod."); return@withService }
@@ -2510,6 +2550,8 @@ class MainActivity : androidx.activity.ComponentActivity() {
         val notes = box("Notes → .html, plus a .zip of text files", "export_notes")
         val bookmarks = box("Safari bookmarks & Reading List → .html (imports into any browser)", "export_bookmarks")
         val calendars = box("Calendars → .ics, one file per calendar (imports into Google Calendar)", "export_calendars")
+        val safariHistory = box("Safari history → .html", "export_safari_history")
+        val calls = box("Call & FaceTime history → .html", "export_calls")
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad / 2, pad, 0)
@@ -2522,21 +2564,26 @@ class MainActivity : androidx.activity.ComponentActivity() {
             addView(notes)
             addView(bookmarks)
             addView(calendars)
+            addView(safariHistory)
+            addView(calls)
         }
         MaterialAlertDialogBuilder(this)
-            .setTitle("Contacts, Notes, Bookmarks & Calendars")
+            .setTitle("Personal data")
             .setView(body)
             .setPositiveButton("Export") { _, _ ->
                 prefs.edit().putBoolean("export_contacts", contacts.isChecked).putBoolean("export_notes", notes.isChecked)
-                    .putBoolean("export_bookmarks", bookmarks.isChecked).putBoolean("export_calendars", calendars.isChecked).apply()
-                if (contacts.isChecked || notes.isChecked || bookmarks.isChecked || calendars.isChecked)
-                    runPersonalExport(device, contacts.isChecked, notes.isChecked, bookmarks.isChecked, calendars.isChecked)
+                    .putBoolean("export_bookmarks", bookmarks.isChecked).putBoolean("export_calendars", calendars.isChecked)
+                    .putBoolean("export_safari_history", safariHistory.isChecked).putBoolean("export_calls", calls.isChecked).apply()
+                if (contacts.isChecked || notes.isChecked || bookmarks.isChecked || calendars.isChecked || safariHistory.isChecked || calls.isChecked)
+                    runPersonalExport(device, contacts.isChecked, notes.isChecked, bookmarks.isChecked, calendars.isChecked,
+                        safariHistory.isChecked, calls.isChecked)
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun runPersonalExport(device: UsbDevice, doContacts: Boolean, doNotes: Boolean, doBookmarks: Boolean, doCalendars: Boolean) {
+    private fun runPersonalExport(device: UsbDevice, doContacts: Boolean, doNotes: Boolean, doBookmarks: Boolean, doCalendars: Boolean,
+                                  doSafariHistory: Boolean = false, doCalls: Boolean = false) {
         log("\nExporting personal data…")
         runOnDevice(device) { mux, lockdown ->
             val stream = tryAfc2(mux, lockdown) ?: run {
@@ -2621,6 +2668,34 @@ class MainActivity : androidx.activity.ComponentActivity() {
                     }
                 } catch (e: Exception) {
                     log("Calendars FAILED: ${e.message}")
+                }
+
+                val df = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
+                if (doSafariHistory) try {
+                    val bytes = java.io.ByteArrayOutputStream().also { afc.copyFile(SafariHistory.PATH, it) }.toByteArray()
+                    val visits = SafariHistory.parse(Plist.parse(bytes))
+                    if (visits.isEmpty()) log("Safari history: empty.") else {
+                        val where = saveText("Safari History ($owner) $stamp.html", SafariHistory.html(owner, visits, df))
+                        log("Safari history: ${visits.size} pages saved to $where")
+                    }
+                } catch (e: AfcException) {
+                    log("Safari history: none on the device.")
+                } catch (e: Exception) {
+                    log("Safari history FAILED: ${e.message}")
+                }
+
+                if (doCalls) try {
+                    val db = copySqlite(afc, CallHistory.DB_PATH, "calls")
+                    val list = db?.let { withSqlite(it) { CallHistory(it).load() } }.orEmpty()
+                    if (list.isEmpty()) log("Call history: none on the device (an iPod only keeps FaceTime calls).") else {
+                        val contactsList = runCatching {
+                            copySqlite(afc, AddressBook.DB_PATH, "contacts")?.let { withSqlite(it) { AddressBook(it).load() } }
+                        }.getOrNull().orEmpty()
+                        val where = saveText("Call History ($owner) $stamp.html", CallHistoryHtml.html(owner, list, ContactNames(contactsList), df))
+                        log("Call history: ${list.size} calls saved to $where")
+                    }
+                } catch (e: Exception) {
+                    log("Call history FAILED: ${e.message}")
                 }
             }
         }
@@ -3086,6 +3161,455 @@ class MainActivity : androidx.activity.ComponentActivity() {
                         (if (stopped && done < items.size) ", ${items.size - done} not installed" else "") +
                         (if (failed.isEmpty()) "." else "\nFailed: ${failed.joinToString()}"))
                 }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- device tools
+
+    private fun saveBytes(name: String, sub: String, bytes: ByteArray): String {
+        val t = IpaSaver(this).create(name, sub)
+        try {
+            t.stream.write(bytes)
+            t.commit()
+            return t.location
+        } catch (e: Exception) {
+            t.discard()
+            throw e
+        }
+    }
+
+    private fun today() = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+
+    private fun monoText(text: String) = TextView(this).apply {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        setPadding(pad, pad / 2, pad, pad / 2)
+        typeface = Typeface.MONOSPACE
+        textSize = 11.5f
+        setTextIsSelectable(true)
+        this.text = text
+    }
+
+    /** Model, iOS, serial numbers, storage, battery health and jailbreak status, shown and saveable as text. */
+    private fun showDeviceInfo(device: UsbDevice) {
+        log("\nReading device info…")
+        var report: String? = null
+        var owner = "device"
+        runOnDevice(device, after = { report?.let { r -> runOnUiThread { showReport(r, owner) } } }) { mux, lockdown ->
+            owner = lockdown.deviceName
+            @Suppress("UNCHECKED_CAST")
+            val info = (lockdown.value(null, null) as? Map<String, Any?>) ?: emptyMap()
+            @Suppress("UNCHECKED_CAST")
+            val disk = lockdown.value(null, "com.apple.disk_usage") as? Map<String, Any?>
+            @Suppress("UNCHECKED_CAST")
+            val battery = lockdown.value(null, "com.apple.mobile.battery") as? Map<String, Any?>
+            var gas: Map<String, Any?>? = null
+            var power: Map<String, Any?>? = null
+            runCatching {
+                withService(mux, lockdown, DiagnosticsRelay.SERVICE) { s ->
+                    val d = DiagnosticsRelay(s)
+                    gas = d.gasGauge()
+                    power = d.ioRegistry("IOPMPowerSource")
+                    d.goodbye()
+                }
+            }.onFailure { log("(battery diagnostics not available: ${it.message})") }
+            val afc2 = tryAfc2(mux, lockdown)
+            val jb = if (afc2 == null) "not detected (no AFC2)" else afc2.use { s ->
+                val afc = AfcClient(s)
+                val cydia = runCatching { afc.stat("/Applications/Cydia.app") }.isSuccess
+                "yes (AFC2 installed" + (if (cydia) ", Cydia present)" else ")")
+            }
+            report = DeviceReport.text(DeviceReport.Input(info, disk, battery, gas, power, jb, lockdown.deviceTime()))
+            log("Done.")
+        }
+    }
+
+    private fun showReport(report: String, owner: String) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Device info")
+            .setView(android.widget.ScrollView(this).apply { addView(monoText(report)) })
+            .setPositiveButton("Save") { _, _ ->
+                runCatching { saveBytes(IpaSaver.clean("Device report ($owner) ${today()}") + ".txt", PERSONAL_SUBFOLDER, report.toByteArray()) }
+                    .onSuccess { log("Saved $it") }.onFailure { log("Save FAILED: ${it.message}") }
+            }
+            .setNeutralButton("Copy") { _, _ ->
+                (getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                    .setPrimaryClip(android.content.ClipData.newPlainText("Device report", report))
+                Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    /** Restart, shut down or sleep the device through diagnostics_relay. */
+    private fun showPower(device: UsbDevice) {
+        val actions = arrayOf("Restart", "Shut down", "Sleep (turn the screen off)")
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Power")
+            .setItems(actions) { _, which ->
+                log("\n${actions[which].substringBefore(" (")}…")
+                runOnDevice(device) { mux, lockdown ->
+                    withService(mux, lockdown, DiagnosticsRelay.SERVICE) { s ->
+                        val d = DiagnosticsRelay(s)
+                        when (which) {
+                            0 -> { d.restart(); log("Restarting. It'll reconnect once it's back on the home screen.") }
+                            1 -> { d.shutdown(); log("Shutting down.") }
+                            else -> { d.sleep(); log("Asleep ✓") }
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // ---------------------------------------------------------------- system log
+
+    /**
+     * Live console (com.apple.syslog_relay): the same messages Xcode's console shows. Each message ends
+     * with a NUL byte. Useful for seeing why an app crashes or a profile or install is refused.
+     */
+    private fun showSyslog(device: UsbDevice) {
+        log("\nStarting the live system log…")
+        val all = ArrayList<String>()
+        val pending = StringBuilder()
+        val runningFlag = java.util.concurrent.atomic.AtomicBoolean(true)
+        var paused = false
+        var filter = ""
+        val handler = android.os.Handler(mainLooper)
+        val density = resources.displayMetrics.density
+        val pad = (12 * density).toInt()
+        val text = monoText("").apply { textSize = 10.5f; setTextIsSelectable(false) }
+        val scroll = android.widget.ScrollView(this).apply { addView(text) }
+        val filterBox = android.widget.EditText(this).apply {
+            hint = "Filter (e.g. an app name)"
+            isSingleLine = true
+            textSize = 14f
+        }
+        val status = TextView(this).apply { textSize = 12f; alpha = 0.7f; setPadding(pad, 0, pad, 0) }
+        fun render() {
+            val shown = if (filter.isEmpty()) all.takeLast(1500) else all.filter { it.contains(filter, true) }.takeLast(1500)
+            text.text = shown.joinToString("\n")
+            status.text = "${all.size} lines" + (if (filter.isNotEmpty()) " · ${shown.size} match" else "") + if (paused) " · paused" else ""
+            scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+        }
+        filterBox.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) { filter = s?.toString()?.trim().orEmpty(); render() }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, 0, pad, 0)
+            addView(filterBox)
+            addView(status)
+            addView(scroll, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.55).toInt()))
+        }
+        val tick = object : Runnable {
+            override fun run() {
+                if (!runningFlag.get()) return
+                val chunk = synchronized(pending) { pending.toString().also { pending.setLength(0) } }
+                if (chunk.isNotEmpty()) {
+                    synchronized(all) {
+                        all += chunk.split('\u0000', '\n').map { it.trimEnd() }.filter { it.isNotEmpty() }
+                        if (all.size > 20_000) all.subList(0, all.size - 20_000).clear()
+                    }
+                    if (!paused) render()
+                }
+                handler.postDelayed(this, 400)
+            }
+        }
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle("System log")
+            .setView(body)
+            .setPositiveButton("Save", null)
+            .setNeutralButton("Pause", null)
+            .setNegativeButton("Stop", null)
+            .setCancelable(false)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+                val lines = synchronized(all) { all.joinToString("\n") }
+                runCatching {
+                    saveBytes("System log (${ui.device?.substringBefore(" ·") ?: "device"}) " +
+                        java.text.SimpleDateFormat("yyyy-MM-dd HH.mm", java.util.Locale.US).format(java.util.Date()) + ".txt",
+                        PERSONAL_SUBFOLDER, (lines + "\n").toByteArray())
+                }.onSuccess { Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show(); log("Saved $it") }
+                    .onFailure { log("Save FAILED: ${it.message}") }
+            }
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL).setOnClickListener { b ->
+                paused = !paused
+                (b as android.widget.Button).text = if (paused) "Resume" else "Pause"
+                render()
+            }
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).setOnClickListener { runningFlag.set(false); dialog.dismiss() }
+        }
+        runOnDevice(device, after = { runningFlag.set(false); runOnUiThread { if (dialog.isShowing) status.text = "Disconnected · ${all.size} lines" } }) { mux, lockdown ->
+            withService(mux, lockdown, "com.apple.syslog_relay") { s ->
+                runOnUiThread { dialog.show(); handler.post(tick) }
+                val buf = ByteArray(16384)
+                while (runningFlag.get()) {
+                    val n = try {
+                        s.readSome(buf, 0, buf.size, 1000)
+                    } catch (e: IOException) {
+                        if (e.message?.startsWith("Read timed out") == true) continue
+                        throw e
+                    }
+                    if (n < 0) break
+                    synchronized(pending) { pending.append(String(buf, 0, n, Charsets.UTF_8)) }
+                }
+            }
+            log("System log stopped.")
+        }
+    }
+
+    // ---------------------------------------------------------------- crash reports
+
+    /**
+     * Crash logs: com.apple.crashreportmover first moves new reports out of the system's private
+     * folders (it answers "ping" when done), then com.apple.crashreportcopymobile is an AFC service
+     * rooted at the crash report folder.
+     */
+    private fun browseCrashReports(device: UsbDevice) {
+        runPicker(
+            device,
+            what = "crash reports",
+            dialogTitle = "Crash reports",
+            subfolder = CRASH_SUBFOLDER,
+            service = "com.apple.crashreportcopymobile",
+            prepare = { mux, lockdown ->
+                runCatching {
+                    withService(mux, lockdown, "com.apple.crashreportmover") { s -> runCatching { s.readFully(4, 30_000) } }
+                }.onFailure { log("(couldn't run the crash report mover: ${it.message})") }
+            },
+            load = { afc ->
+                val out = ArrayList<AfcClient.Entry>()
+                fun walk(dir: String, depth: Int) {
+                    for (name in runCatching { afc.readDir(dir) }.getOrDefault(emptyList())) {
+                        val e = runCatching { afc.stat(join(dir, name)) }.getOrNull() ?: continue
+                        if (e.isDir) { if (depth < 3) walk(e.path, depth + 1) } else if (!e.isLink) out += e
+                    }
+                }
+                walk("/", 0)
+                out.sortedByDescending { it.mtimeMs }
+            },
+            pick = { e ->
+                val folder = parent(e.path).trim('/')
+                Pick(e.path, e.path.substringAfterLast('/'),
+                    (if (e.mtimeMs > 0) shortDate(e.mtimeMs) + " · " else "") + humanSize(e.size) + if (folder.isNotEmpty()) " · $folder" else "",
+                    e.size)
+            },
+            saveOne = { afc, saver, e, used ->
+                val name = MusicLibrary.uniqueName(IpaSaver.clean(e.path.trim('/').replace('/', ' ')), used)
+                val t = saver.create(name, CRASH_SUBFOLDER)
+                try {
+                    afc.copyFile(e.path, t.stream)
+                    t.commit()
+                    t.location
+                } catch (ex: Exception) {
+                    t.discard()
+                    throw ex
+                }
+            },
+        )
+    }
+
+    // ---------------------------------------------------------------- home screen
+
+    private var pendingLayoutDevice: UsbDevice? = null
+    private val pickLayout = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        val device = pendingLayoutDevice ?: return@registerForActivityResult
+        pendingLayoutDevice = null
+        if (uri != null) confirmRestoreLayout(device, uri)
+    }
+
+    private fun showHomeScreen(device: UsbDevice) {
+        val actions = arrayOf("Save layout (icons and folders)", "Restore a saved layout…", "Save wallpapers")
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Home screen")
+            .setItems(actions) { _, which ->
+                when (which) {
+                    0 -> saveLayout(device)
+                    1 -> { pendingLayoutDevice = device; pickLayout.launch(arrayOf("*/*")) }
+                    else -> saveWallpapers(device)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun saveLayout(device: UsbDevice) {
+        log("\nSaving the home screen layout…")
+        runOnDevice(device) { mux, lockdown ->
+            val state = withService(mux, lockdown, SpringBoardServices.SERVICE) { SpringBoardServices(it).iconState() }
+            val (pages, folders, apps) = HomeScreen.counts(state)
+            val base = IpaSaver.clean("Home Screen (${lockdown.deviceName}) ${today()}")
+            val where = saveBytes("$base.plist", PERSONAL_SUBFOLDER, Plist.toXml(state).toByteArray())
+            saveBytes("$base.txt", PERSONAL_SUBFOLDER, HomeScreen.summary(state).toByteArray())
+            log("Saved $where (and a .txt outline): $pages pages, $folders folders, $apps icons.")
+        }
+    }
+
+    private fun confirmRestoreLayout(device: UsbDevice, uri: android.net.Uri) {
+        val state = runCatching { contentResolver.openInputStream(uri)!!.use { Plist.parse(it.readBytes()) } }.getOrNull()
+        if (!HomeScreen.looksValid(state)) {
+            log("That file isn't a saved home screen layout (pick a \"Home Screen … .plist\").")
+            return
+        }
+        state as List<*>
+        val (pages, folders, apps) = HomeScreen.counts(state)
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Restore home screen?")
+            .setMessage("Rearranges the home screen to this layout: $pages pages, $folders folders, $apps icons.\n\n" +
+                "Apps that aren't installed are skipped, and apps not in the layout are added at the end.")
+            .setPositiveButton("Restore") { _, _ ->
+                log("\nRestoring the home screen layout…")
+                runOnDevice(device) { mux, lockdown ->
+                    withService(mux, lockdown, SpringBoardServices.SERVICE) { s ->
+                        SpringBoardServices(s).setIconState(state)
+                        Thread.sleep(1500) // let SpringBoard read it before the connection closes
+                    }
+                    log("Sent ✓ The icons rearrange in a moment.")
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Home wallpaper from SpringBoard (no jailbreak needed); lock (and full-size home) wallpaper via AFC2. */
+    private fun saveWallpapers(device: UsbDevice) {
+        log("\nSaving wallpapers…")
+        runOnDevice(device) { mux, lockdown ->
+            val owner = IpaSaver.clean(lockdown.deviceName)
+            var saved = 0
+            runCatching {
+                withService(mux, lockdown, SpringBoardServices.SERVICE) { SpringBoardServices(it).homeWallpaperPng() }
+            }.getOrNull()?.let { png ->
+                log("Saved " + saveBytes("Home Screen Wallpaper ($owner).png", PHOTOS_SUBFOLDER, (if (CgbiPng.isCgbi(png)) CgbiPng.toStandard(png) ?: png else png)))
+                saved++
+            }
+            val afc2 = tryAfc2(mux, lockdown)
+            if (afc2 == null) {
+                log("The lock screen wallpaper needs a jailbroken device with AFC2.")
+            } else afc2.use { s ->
+                val afc = AfcClient(s)
+                val dir = "/var/mobile/Library/SpringBoard"
+                for ((file, label) in listOf("LockBackground" to "Lock Screen Wallpaper", "HomeBackground" to "Home Screen Wallpaper (full size)")) {
+                    try {
+                        val bytes = java.io.ByteArrayOutputStream().also { afc.copyFile("$dir/$file.cpbitmap", it) }.toByteArray()
+                        val img = CpBitmap.decode(bytes) ?: throw IOException("unrecognized .cpbitmap")
+                        val bmp = android.graphics.Bitmap.createBitmap(img.argb, img.width, img.height, android.graphics.Bitmap.Config.ARGB_8888)
+                        val png = java.io.ByteArrayOutputStream().also { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+                        log("Saved " + saveBytes("$label ($owner).png", PHOTOS_SUBFOLDER, png) + " (${img.width}×${img.height})")
+                        saved++
+                    } catch (e: AfcException) {
+                        if (file == "LockBackground") log("No custom lock screen wallpaper (the default one isn't stored as a file).")
+                    } catch (e: Exception) {
+                        log("$label FAILED: ${e.message}")
+                    }
+                }
+            }
+            log("Done: $saved saved.")
+        }
+    }
+
+    // ---------------------------------------------------------------- uninstall
+
+    private fun startUninstall(device: UsbDevice) {
+        log("\nLoading installed apps…")
+        var apps: List<InstallationProxy.App> = emptyList()
+        runOnDevice(device, after = { runOnUiThread { showUninstallPicker(device, apps) } }) { mux, lockdown ->
+            apps = withService(mux, lockdown, InstallationProxy.SERVICE) { InstallationProxy(it).browseUserApps() }
+            log("${apps.size} user apps installed.")
+        }
+    }
+
+    private fun showUninstallPicker(device: UsbDevice, apps: List<InstallationProxy.App>) {
+        if (isFinishing || apps.isEmpty()) return
+        val saved = IpaSaver(this).existingNames()
+        val isSaved = apps.map { IpaSaver.ipaName(it.name, it.version, it.bundleId) in saved }
+        val labels = apps.mapIndexed { i, a -> (if (isSaved[i]) "✓ " else "") + "${a.name} ${a.version}${sizeLabel(a.sizeBytes)}" }
+        val checked = BooleanArray(apps.size)
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Uninstall which apps? (✓ = backed up)")
+            .setMultiChoiceItems(labels.toTypedArray(), checked) { _, i, on -> checked[i] = on }
+            .setPositiveButton("Uninstall") { _, _ ->
+                val chosen = apps.filterIndexed { i, _ -> checked[i] }
+                if (chosen.isEmpty()) return@setPositiveButton
+                val notSaved = chosen.filterIndexed { _, a -> !isSaved[apps.indexOf(a)] }
+                MaterialAlertDialogBuilder(this)
+                    .setTitle("Uninstall ${chosen.size} app${if (chosen.size == 1) "" else "s"}?")
+                    .setMessage("Deletes ${chosen.joinToString { it.name }} and all their data (saves, settings) from the device." +
+                        if (notSaved.isEmpty()) "" else "\n\n⚠ Not backed up: ${notSaved.joinToString { it.name }}. " +
+                            "Apps no longer in the App Store can't be downloaded again.")
+                    .setPositiveButton("Uninstall") { _, _ -> runUninstall(device, chosen) }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun runUninstall(device: UsbDevice, apps: List<InstallationProxy.App>) {
+        log("\nUninstalling ${apps.size} app(s)…")
+        runOnDevice(device) { mux, lockdown ->
+            withService(mux, lockdown, InstallationProxy.SERVICE) { s ->
+                val ip = InstallationProxy(s)
+                var ok = 0
+                for ((i, a) in apps.withIndex()) {
+                    try {
+                        ip.uninstall(a.bundleId)
+                        ok++
+                        log("[${i + 1}/${apps.size}] ${a.name} ✓")
+                    } catch (e: Exception) {
+                        log("[${i + 1}/${apps.size}] ${a.name} FAILED: ${e.message}")
+                    }
+                }
+                log("Done: $ok uninstalled.")
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- auto-backup
+
+    /** On plug-in (when enabled): back up apps that aren't saved yet, without asking. */
+    private fun autoBackup(device: UsbDevice) {
+        log("\nAuto-backup: checking for new apps…")
+        var todo: List<InstallationProxy.App> = emptyList()
+        val saved = IpaSaver(this).existingNames()
+        runOnDevice(device, after = {
+            runOnUiThread {
+                if (todo.isNotEmpty()) backup(device, todo, skipSaved = true, includeData = prefs.getBoolean("include_data", false), savedNames = saved)
+            }
+        }) { mux, lockdown ->
+            val apps = withService(mux, lockdown, InstallationProxy.SERVICE) { InstallationProxy(it).browseUserApps() }
+            todo = apps.filter { IpaSaver.ipaName(it.name, it.version, it.bundleId) !in saved }
+            log(if (todo.isEmpty()) "All ${apps.size} apps are already backed up." else "${todo.size} new or updated app(s) to back up.")
+        }
+    }
+
+    // ---------------------------------------------------------------- Cydia
+
+    private fun exportCydia(device: UsbDevice) {
+        log("\nExporting Cydia packages…")
+        runOnDevice(device) { mux, lockdown ->
+            val stream = tryAfc2(mux, lockdown) ?: run {
+                log("The package list is in a system folder that needs a jailbroken device with AFC2.")
+                return@runOnDevice
+            }
+            stream.use {
+                val afc = AfcClient(stream)
+                fun read(path: String) = java.io.ByteArrayOutputStream().also { afc.copyFile(path, it) }.toString("UTF-8")
+                val packages = Dpkg.parseStatus(read(Dpkg.STATUS))
+                val sources = (runCatching { afc.readDir(Dpkg.SOURCES_DIR) }.getOrDefault(emptyList())
+                    .filter { it.endsWith(".list") }.map { "${Dpkg.SOURCES_DIR}/$it" } + Dpkg.SOURCES_FILE)
+                    .flatMap { p -> runCatching { Dpkg.parseSources(read(p)) }.getOrDefault(emptyList()) }.distinct()
+                val owner = lockdown.deviceName
+                val base = IpaSaver.clean("Cydia Packages ($owner) ${today()}")
+                val where = saveBytes("$base.html", PERSONAL_SUBFOLDER, Dpkg.html(owner, packages, sources, today()).toByteArray())
+                saveBytes("$base.txt", PERSONAL_SUBFOLDER, Dpkg.text(packages, sources).toByteArray())
+                log("${packages.count { !Dpkg.isSystem(it) }} tweaks and apps, ${packages.count(Dpkg::isSystem)} system packages, " +
+                    "${sources.size} sources saved to $where (and a .txt list)")
             }
         }
     }

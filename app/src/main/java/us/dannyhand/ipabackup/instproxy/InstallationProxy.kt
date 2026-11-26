@@ -92,6 +92,11 @@ class InstallationProxy(private val conn: ByteConnection) {
         runCommand(mapOf("Command" to "Install", "PackagePath" to packagePath, "ClientOptions" to options), progress)
     }
 
+    /** Deletes an app and its data from the device. */
+    fun uninstall(bundleId: String, progress: (String, Int?) -> Unit = { _, _ -> }) {
+        runCommand(mapOf("Command" to "Uninstall", "ApplicationIdentifier" to bundleId), progress)
+    }
+
     /** Deletes the device-side archive for [bundleId]. */
     fun removeArchive(bundleId: String) {
         runCommand(mapOf("Command" to "RemoveArchive", "ApplicationIdentifier" to bundleId)) { _, _ -> }

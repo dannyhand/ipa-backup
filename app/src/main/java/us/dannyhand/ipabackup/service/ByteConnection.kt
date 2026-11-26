@@ -29,6 +29,13 @@ object PlistService {
         c.write(ByteBuffer.allocate(4 + body.size).putInt(body.size).put(body).array())
     }
 
+    /** A reply that may be any plist value (some services answer with an array). */
+    fun receiveAny(c: ByteConnection, timeoutMs: Long = 10_000): Any? {
+        val len = ByteBuffer.wrap(c.readFully(4, timeoutMs)).int
+        if (len <= 0 || len > (16 shl 20)) throw IOException("Bad plist message length $len")
+        return Plist.parse(c.readFully(len, timeoutMs))
+    }
+
     @Suppress("UNCHECKED_CAST")
     fun receive(c: ByteConnection, timeoutMs: Long = 10_000): Map<String, Any?> {
         val len = ByteBuffer.wrap(c.readFully(4, timeoutMs)).int

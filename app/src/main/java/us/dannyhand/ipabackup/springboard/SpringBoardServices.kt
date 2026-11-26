@@ -12,4 +12,21 @@ class SpringBoardServices(private val conn: ByteConnection) {
         PlistService.send(conn, mapOf("command" to "getIconPNGData", "bundleId" to bundleId))
         return PlistService.receive(conn)["pngData"] as? ByteArray
     }
+
+    /** The home screen layout: a list of pages (dock first), each a list of icons and folders. */
+    fun iconState(): List<*> {
+        PlistService.send(conn, mapOf("command" to "getIconState", "formatVersion" to "2"))
+        return PlistService.receiveAny(conn, 30_000) as? List<*> ?: throw java.io.IOException("Unexpected icon state reply")
+    }
+
+    /** Rearranges the home screen. SpringBoard sends no reply. */
+    fun setIconState(state: List<*>) {
+        PlistService.send(conn, mapOf("command" to "setIconState", "iconState" to state))
+    }
+
+    /** The home screen wallpaper as PNG (iOS 4.2 and later). */
+    fun homeWallpaperPng(): ByteArray? {
+        PlistService.send(conn, mapOf("command" to "getHomeScreenWallpaperPNGData"))
+        return PlistService.receive(conn, 30_000)["pngData"] as? ByteArray
+    }
 }
