@@ -318,10 +318,25 @@ class MainActivity : androidx.activity.ComponentActivity() {
                 }
             }
             log("(lockdown connection was closed by the iPod; reconnecting)")
-            close()
-            stream = mux.connect(LockdownClient.PORT)
-            client = openSession(stream, quiet = true)
-            return client.startService(name)
+            // lockdownd drops idle connections (e.g. during a long copy). A reconnect made just as it's still
+            // tearing the old one down can fail mid-handshake (seen as "Handshake message of unrecognized
+            // type"), so try a few times with a short pause before giving up.
+            var last: Exception? = null
+            for (attempt in 1..3) {
+                close()
+                if (attempt > 1) Thread.sleep(500L * attempt)
+                try {
+                    stream = mux.connect(LockdownClient.PORT)
+                    client = openSession(stream, quiet = true)
+                    return client.startService(name)
+                } catch (e: LockdownException) {
+                    throw e
+                } catch (e: IOException) {
+                    last = e
+                    log("  (reconnect attempt $attempt failed: ${e.message}${if (attempt < 3) "; retrying" else ""})")
+                }
+            }
+            throw last ?: IOException("Couldn't reconnect to lockdownd")
         }
 
         fun close() {
