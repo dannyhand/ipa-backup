@@ -11,6 +11,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import us.dannyhand.ipabackup.device.DeviceReport
 import us.dannyhand.ipabackup.device.HomeScreen
+import us.dannyhand.ipabackup.device.WinterBoard.Kind as WbKind
 import us.dannyhand.ipabackup.jailbreak.Dpkg
 import us.dannyhand.ipabackup.media.BookImport
 import us.dannyhand.ipabackup.personal.CallHistory
@@ -45,6 +46,18 @@ class CpBitmapTest {
         val img = CpBitmap.decode(data)!!
         assertEquals(3, img.width); assertEquals(2, img.height)
         assertEquals(0xFFC81414.toInt(), img.argb[1 * 3 + 2]) // r=200 g=20 b=20, alpha forced opaque
+    }
+
+    @Test fun ios6StyleWithPlistFooterAndPadding() {
+        // 10×3 pixels, rows padded to 16 px, then a ~70-byte bplist footer with width/height 20 and 16 bytes from the end.
+        val w = 10; val h = 3; val stride = 16 * 4
+        val pix = ByteArray(stride * h)
+        for (y in 0 until h) for (x in 0 until w) { val o = y * stride + x * 4; pix[o] = 1; pix[o + 1] = 2; pix[o + 2] = (y * 10 + x).toByte(); pix[o + 3] = -1 }
+        val footer = ByteBuffer.allocate(70).order(ByteOrder.LITTLE_ENDIAN)
+        footer.put("bplist00".toByteArray()); footer.position(50); footer.putShort(w.toShort()).putShort(0).putShort(h.toShort())
+        val img = CpBitmap.decode(pix + footer.array())!!
+        assertEquals(10, img.width); assertEquals(3, img.height)
+        assertEquals(0xFF000000.toInt() or (21 shl 16) or (2 shl 8) or 1, img.argb[2 * w + 1])
     }
 
     @Test fun rejectsGarbage() {
@@ -243,5 +256,27 @@ class BookImportTest {
         assertEquals("$pid.epub", e["Path"]); assertEquals("New", e["Name"]); assertEquals("B", e["Artist"])
         assertTrue(BookImport.alreadyThere(out, info))
         assertEquals(1, (BookImport.withBook(null, info, pid, byteArrayOf())["Books"] as List<*>).size)
+    }
+}
+
+class WinterBoardTest {
+    @Test fun activeThemesInOrder() {
+        val prefs = mapOf("Themes" to listOf(
+            mapOf("Name" to "Animated Lock", "Active" to true),
+            mapOf("Name" to "Old Theme", "Active" to false),
+            mapOf("Name" to "Icons HD", "Active" to true),
+        ))
+        assertEquals(listOf("Animated Lock", "Icons HD"), us.dannyhand.ipabackup.device.WinterBoard.activeThemes(prefs))
+        assertTrue(us.dannyhand.ipabackup.device.WinterBoard.activeThemes(null).isEmpty())
+    }
+
+    @Test fun picksTheFileWinterBoardUses() {
+        val wb = us.dannyhand.ipabackup.device.WinterBoard
+        val files = listOf("Info.plist", "Wallpaper.png", "Wallpaper@2x.png", "LockBackground.html", "LockBackground.png", "Icons")
+        assertEquals("Wallpaper@2x.png", wb.pick(files, WbKind.HOME))
+        assertEquals("LockBackground.html", wb.pick(files, WbKind.LOCK))
+        assertEquals("wallpaper.MP4", wb.pick(listOf("wallpaper.MP4", "Wallpaper.jpg"), WbKind.HOME))
+        assertEquals(null, wb.pick(listOf("Wallpaper.txt", "Other.png"), WbKind.HOME))
+        assertTrue(wb.isAnimatedPage("LockBackground.html"))
     }
 }

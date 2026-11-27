@@ -33,6 +33,23 @@ class PlaylistsTest {
         assertTrue(p[1].smart)
     }
 
+    @Test fun ios6PackedItemIds() {
+        fun packed(order: ByteOrder, vararg ids: Long) = "X'" + ByteBuffer.allocate(8 * ids.size).order(order).apply { ids.forEach { putLong(it) } }
+            .array().joinToString("") { "%02X".format(it) } + "'"
+        for (order in listOf(ByteOrder.LITTLE_ENDIAN, ByteOrder.BIG_ENDIAN)) {
+            val big1 = -4_611_686_018_427_387_901L; val big2 = 1_234_567_890_123L
+            val d = db(
+                "CREATE TABLE item (item_pid INTEGER PRIMARY KEY)",
+                "INSERT INTO item VALUES ($big1), ($big2), (77)",
+                "CREATE TABLE container (container_pid INTEGER PRIMARY KEY, name TEXT, distinguished_kind INTEGER)",
+                "INSERT INTO container VALUES (5, 'Mix', 0)",
+                "CREATE TABLE container_items (container_pid INTEGER PRIMARY KEY, item_pid_data BLOB, item_pid_data_size INTEGER)",
+                "INSERT INTO container_items VALUES (5, ${packed(order, big2, big1, 77)}, 24)",
+            )
+            assertEquals(listOf(Playlist("Mix", listOf(big2, big1, 77L))), Playlists.fromSql(d))
+        }
+    }
+
     @Test fun ios34ItemToContainer() {
         val d = db(
             "CREATE TABLE container (pid INTEGER PRIMARY KEY, name TEXT, distinguished_kind INTEGER)",

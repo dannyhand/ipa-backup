@@ -548,7 +548,7 @@ internal fun MainActivity.saveMedia(afc: AfcClient, items: List<CameraRoll.Media
         for ((i, m) in items.withIndex()) {
             if (stopMode != StopMode.NONE) break
             val name = MusicLibrary.uniqueName(m.name, used)
-            if (m.size > (5L shl 20) || i % 10 == 0 || i == items.size - 1) log("[${i + 1}/${items.size}] $name (${humanSize(m.size)})")
+            if (items.size <= 20 || m.size > (5L shl 20) || i % 10 == 0 || i == items.size - 1) log("[${i + 1}/${items.size}] $name (${humanSize(m.size)})")
             val target = saver.create(name, PHOTOS_SUBFOLDER, m.mtimeMs)
             try {
                 afc.copyFile(m.path, target.stream)

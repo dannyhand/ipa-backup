@@ -564,12 +564,7 @@ internal fun MainActivity.showPlaylists(device: UsbDevice, tracks: List<MusicLib
         text = "Also copy songs that aren't saved yet"
         isChecked = prefs.getBoolean("playlist_copy_songs", false)
     }
-    val list = android.widget.ListView(this).apply {
-        choiceMode = android.widget.ListView.CHOICE_MODE_MULTIPLE
-        adapter = android.widget.ArrayAdapter(this@showPlaylists, android.R.layout.simple_list_item_multiple_choice, labels)
-        for (i in labels.indices) setItemChecked(i, true)
-        setOnItemClickListener { _, _, i, _ -> checked[i] = isItemChecked(i) }
-    }
+    val list = checkList(labels, checked, 0.45)
     val pad = (16 * resources.displayMetrics.density).toInt()
     val body = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
@@ -581,7 +576,7 @@ internal fun MainActivity.showPlaylists(device: UsbDevice, tracks: List<MusicLib
             alpha = 0.8f
         })
         addView(copyBox)
-        addView(list, LinearLayout.LayoutParams(-1, (resources.displayMetrics.heightPixels * 0.45).toInt()))
+        addView(list)
     }
     MaterialAlertDialogBuilder(this)
         .setTitle("Export playlists")

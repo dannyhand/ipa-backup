@@ -19,9 +19,11 @@ object LibrarySample {
         db.query("SELECT sqlite_version()").firstOrNull()?.let { out.write("-- dumped with sqlite ${it[0]}\n") }
 
         val master = db.query("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, rowid")
-        val tables = master.filter { it[0] == "table" && !(it[1] as String).startsWith("sqlite_") }.map { it[1] as String }
+        // Virtual tables (e.g. item_to_container on iOS 6) need Apple's own SQLite modules; they can't be read or recreated.
+        fun isVirtual(r: List<Any?>) = (r[3] as? String)?.trimStart()?.startsWith("CREATE VIRTUAL TABLE", ignoreCase = true) == true
+        val tables = master.filter { it[0] == "table" && !(it[1] as String).startsWith("sqlite_") && !isVirtual(it) }.map { it[1] as String }
         out.write("\n-- Row counts\n")
-        val counts = tables.associateWith { t -> (db.query("SELECT count(*) FROM \"$t\"").first()[0] as Number).toLong() }
+        val counts = tables.associateWith { t -> runCatching { (db.query("SELECT count(*) FROM \"$t\"").first()[0] as Number).toLong() }.getOrDefault(-1L) }
         counts.forEach { (t, n) -> out.write("--   $t: $n\n") }
 
         // Sample songs: a spread of media types (music, podcasts, videos…) plus random music.
@@ -33,9 +35,13 @@ object LibrarySample {
         }
         out.write("\n-- Sampled item_pid: ${sample.joinToString(",")}\n\nPRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n")
 
-        for (row in master.filter { it[0] == "table" && !(it[1] as String).startsWith("sqlite_") }) out.write("${row[3]};\n")
+        for (row in master.filter { it[0] == "table" && !(it[1] as String).startsWith("sqlite_") }) {
+            if (isVirtual(row)) out.write("-- virtual table (needs Apple's own SQLite module, so not recreated):\n" +
+                (row[3] as String).lines().joinToString("\n") { "--   $it" } + "\n")
+            else out.write("${row[3]};\n")
+        }
 
-        for (t in tables) {
+        for (t in tables) try {
             val cols = db.query("PRAGMA table_info(\"$t\")").map { it[1] as String }
             val where = when {
                 "item_pid" in cols && sample.isNotEmpty() -> " WHERE item_pid IN (${sample.joinToString(",")})"
@@ -49,6 +55,8 @@ object LibrarySample {
                 r.forEachIndexed { i, v -> if (i > 0) out.write(","); out.write(literal(v)) }
                 out.write(");\n")
             }
+        } catch (e: Exception) {
+            out.write("-- $t: couldn't read rows (${e.message?.lineSequence()?.firstOrNull()})\n")
         }
         for (row in master.filter { it[0] != "table" }) out.write("${row[3]};\n")
         out.write("COMMIT;\n")

@@ -154,8 +154,9 @@ internal fun MainActivity.startMusicLibraryBackup(device: UsbDevice) {
     var found = emptyList<String>()
     var libSize = 0L
     var artSize = 0L
+    var biggest = emptyList<Pair<String, Long>>()
     var ok = false
-    runOnDevice(device, after = { if (ok) runOnUiThread { showMusicLibraryDialog(device, found, libSize, artSize) } }) { mux, lockdown ->
+    runOnDevice(device, after = { if (ok) runOnUiThread { showMusicLibraryDialog(device, found, libSize, artSize, biggest) } }) { mux, lockdown ->
         withService(mux, lockdown, AfcClient.SERVICE) { s ->
             val afc = AfcClient(s)
             val names = runCatching { afc.readDir(LIB_DIR) }.getOrDefault(emptyList()).toSet()
@@ -166,13 +167,18 @@ internal fun MainActivity.startMusicLibraryBackup(device: UsbDevice) {
                 if ("iTunesDB" in names) add("iTunesDB (iPhone OS 1–2)")
             }
             libSize = runCatching { afc.measureTree(LIB_DIR).bytes }.getOrDefault(0L)
+            biggest = names.mapNotNull { n ->
+                val p = "$LIB_DIR/$n"
+                runCatching { afc.stat(p) }.getOrNull()?.let { e -> n to (if (e.isDir) runCatching { afc.measureTree(p).bytes }.getOrDefault(0L) else e.size) }
+            }.sortedByDescending { it.second }.take(6)
             artSize = runCatching { afc.measureTree(ART_DIR).bytes }.getOrDefault(0L)
             ok = true
         }
     }
 }
 
-internal fun MainActivity.showMusicLibraryDialog(device: UsbDevice, found: List<String>, libSize: Long, artSize: Long) {
+internal fun MainActivity.showMusicLibraryDialog(device: UsbDevice, found: List<String>, libSize: Long, artSize: Long,
+                                                 biggest: List<Pair<String, Long>> = emptyList()) {
     val pad = (20 * resources.displayMetrics.density).toInt()
     val art = MaterialCheckBox(this).apply {
         text = "Include artwork (${humanSize(artSize)})"
@@ -184,7 +190,9 @@ internal fun MainActivity.showMusicLibraryDialog(device: UsbDevice, found: List<
         setPadding(pad, pad / 2, pad, 0)
         addView(TextView(this@showMusicLibraryDialog).apply {
             text = (if (found.isEmpty()) "No music library database found." else "Found:\n" + found.joinToString("\n") { "• $it" }) +
+                (if (found.size > 1) "\n(Several formats side by side is normal: iTunes keeps writing the older ones too.)" else "") +
                 "\n\nLibrary folder: ${humanSize(libSize)}. Only the database is saved, not the songs themselves." +
+                (if (biggest.isNotEmpty()) "\nLargest items:\n" + biggest.joinToString("\n") { "• ${it.first}: ${humanSize(it.second)}" } else "") +
                 "\n\nSaved to Download/IPA Backup/$MUSICLIB_SUBFOLDER."
             textSize = 14f
         })

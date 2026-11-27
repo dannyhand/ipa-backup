@@ -36,6 +36,7 @@ import us.dannyhand.ipabackup.afc.AfcException
 import us.dannyhand.ipabackup.certs.McInstall
 import us.dannyhand.ipabackup.device.DeviceReport
 import us.dannyhand.ipabackup.device.HomeScreen
+import us.dannyhand.ipabackup.device.WinterBoard
 import us.dannyhand.ipabackup.diag.DiagnosticsRelay
 import us.dannyhand.ipabackup.jailbreak.Dpkg
 import us.dannyhand.ipabackup.util.CpBitmap
@@ -442,38 +443,88 @@ internal fun MainActivity.confirmRestoreLayout(device: UsbDevice, uri: android.n
 }
 
 /** Home wallpaper from SpringBoard (no jailbreak needed); lock (and full-size home) wallpaper via AFC2. */
+/**
+ * Wallpapers: WinterBoard's (when it's installed and a theme sets one, that's what's on screen, possibly
+ * animated), then iOS's own: the home wallpaper from SpringBoard (no jailbreak needed) and, via AFC2,
+ * the .cpbitmap files iOS keeps underneath (used again if WinterBoard is turned off).
+ */
 internal fun MainActivity.saveWallpapers(device: UsbDevice) {
     log("\nSaving wallpapers…")
     runOnDevice(device) { mux, lockdown ->
         val owner = IpaSaver.clean(lockdown.deviceName)
         var saved = 0
-        runCatching {
-            withService(mux, lockdown, SpringBoardServices.SERVICE) { SpringBoardServices(it).homeWallpaperPng() }
-        }.getOrNull()?.let { png ->
-            log("Saved " + saveBytes("Home Screen Wallpaper ($owner).png", PHOTOS_SUBFOLDER, (if (CgbiPng.isCgbi(png)) CgbiPng.toStandard(png) ?: png else png)))
-            saved++
-        }
         val afc2 = tryAfc2(mux, lockdown)
-        if (afc2 == null) {
-            log("The lock screen wallpaper needs a jailbroken device with AFC2.")
-        } else afc2.use { s ->
+        if (afc2 != null) afc2.use { s ->
             val afc = AfcClient(s)
+            saved += saveWinterBoardWallpapers(afc, owner)
             val dir = "/var/mobile/Library/SpringBoard"
-            for ((file, label) in listOf("LockBackground" to "Lock Screen Wallpaper", "HomeBackground" to "Home Screen Wallpaper (full size)")) {
+            for ((file, label) in listOf("LockBackground" to "Lock Screen Wallpaper (iOS)", "HomeBackground" to "Home Screen Wallpaper (iOS, full size)")) {
                 try {
                     val bytes = java.io.ByteArrayOutputStream().also { afc.copyFile("$dir/$file.cpbitmap", it) }.toByteArray()
-                    val img = CpBitmap.decode(bytes) ?: throw IOException("unrecognized .cpbitmap")
+                    val img = CpBitmap.decode(bytes) ?: throw IOException("unrecognized .cpbitmap (${bytes.size} bytes)")
                     val bmp = android.graphics.Bitmap.createBitmap(img.argb, img.width, img.height, android.graphics.Bitmap.Config.ARGB_8888)
                     val png = java.io.ByteArrayOutputStream().also { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
                     log("Saved " + saveBytes("$label ($owner).png", PHOTOS_SUBFOLDER, png) + " (${img.width}×${img.height})")
                     saved++
                 } catch (e: AfcException) {
-                    if (file == "LockBackground") log("No custom lock screen wallpaper (the default one isn't stored as a file).")
+                    if (file == "LockBackground") log("No iOS lock screen wallpaper file (the default one isn't stored as a file).")
                 } catch (e: Exception) {
                     log("$label FAILED: ${e.message}")
                 }
             }
+        } else {
+            log("The lock screen wallpaper and WinterBoard themes need a jailbroken device with AFC2.")
+            runCatching {
+                withService(mux, lockdown, SpringBoardServices.SERVICE) { SpringBoardServices(it).homeWallpaperPng() }
+            }.getOrNull()?.let { png ->
+                log("Saved " + saveBytes("Home Screen Wallpaper ($owner).png", PHOTOS_SUBFOLDER, (if (CgbiPng.isCgbi(png)) CgbiPng.toStandard(png) ?: png else png)))
+                saved++
+            }
         }
         log("Done: $saved saved.")
     }
+}
+
+/** Saves the wallpapers WinterBoard's active themes put on screen. Returns how many were saved. */
+internal fun MainActivity.saveWinterBoardWallpapers(afc: AfcClient, owner: String): Int {
+    val prefs = runCatching { Plist.parse(java.io.ByteArrayOutputStream().also { afc.copyFile(WinterBoard.PREFS, it) }.toByteArray()) }.getOrNull()
+        ?: return 0 // WinterBoard not installed
+    val themes = WinterBoard.activeThemes(prefs)
+    if (themes.isEmpty()) { log("WinterBoard: no active themes."); return 0 }
+    log("WinterBoard themes, highest priority first: ${themes.joinToString(", ")}")
+    var saved = 0
+    for (kind in WinterBoard.Kind.values()) {
+        // The first active theme with a wallpaper of this kind is the one on screen.
+        val hit = themes.firstNotNullOfOrNull { name ->
+            WinterBoard.themeDirs(name).firstNotNullOfOrNull { dir ->
+                val files = runCatching { afc.readDir(dir) }.getOrNull() ?: return@firstNotNullOfOrNull null
+                WinterBoard.pick(files, kind)?.let { Triple(name, dir, it) }
+            }
+        }
+        if (hit == null) { log("WinterBoard: no theme sets the ${kind.label.lowercase()}."); continue }
+        val (theme, dir, file) = hit
+        try {
+            if (WinterBoard.isAnimatedPage(file)) {
+                // An HTML wallpaper loads pictures and scripts from its theme, so keep the whole theme together.
+                val t = IpaSaver(this).create(IpaSaver.clean("${kind.label} (WinterBoard, $theme)") + ".zip", PHOTOS_SUBFOLDER)
+                try {
+                    val zos = java.util.zip.ZipOutputStream(java.io.BufferedOutputStream(t.stream, 1 shl 16))
+                    val z = AfcZipper(afc, zos)
+                    z.addTree(dir, dir.substringAfterLast('/') + "/")
+                    zos.finish(); zos.flush()
+                    t.commit()
+                    log("Saved ${t.location}: the \"$theme\" theme with its animated $file (${z.files} files). Open $file in a browser to see it.")
+                } catch (e: Exception) { t.discard(); throw e }
+            } else {
+                val bytes = java.io.ByteArrayOutputStream().also { afc.copyFile("$dir/$file", it) }.toByteArray()
+                val ext = file.substringAfterLast('.').lowercase()
+                val out = if (ext == "png" && CgbiPng.isCgbi(bytes)) CgbiPng.toStandard(bytes) ?: bytes else bytes
+                log("Saved " + saveBytes(IpaSaver.clean("${kind.label} (WinterBoard, $theme)") + ".$ext", PHOTOS_SUBFOLDER, out) + " ($file)")
+            }
+            saved++
+        } catch (e: Exception) {
+            log("${kind.label} from WinterBoard FAILED: ${e.message}")
+        }
+    }
+    return saved
 }

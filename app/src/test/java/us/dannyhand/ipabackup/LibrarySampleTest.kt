@@ -22,11 +22,13 @@ class LibrarySampleTest {
                 st.execute("INSERT INTO item_extra VALUES ($i, 'F0$i/ABCD.mp3', X'0102')")
             }
             for (a in 0..9) st.execute("INSERT INTO album VALUES ($a, 'Album $a')")
+            st.execute("CREATE VIRTUAL TABLE item_search USING fts5(title)") // stands in for Apple's ML3 virtual tables
         }
         val out = StringWriter()
         LibrarySample.write(JdbcSqlDb(src), out, sampleSize = 10)
         val sql = out.toString()
         assertTrue(sql.contains("--   item: 300"))
+        assertTrue(sql.contains("-- virtual table"))
 
         val dst = DriverManager.getConnection("jdbc:sqlite::memory:")
         dst.createStatement().use { st ->

@@ -10,6 +10,11 @@ package us.dannyhand.ipabackup.music
  * distinguished_kind and are left out, as are hidden lists and playlist folders. iTunes stores the
  * current contents of smart playlists too, so those export like any other.
  *
+ * On iOS 5 and 6, container_items has no item_pid column: each playlist's songs are packed into a data
+ * column as 64-bit IDs, and item_to_container is a virtual table built on Apple's own SQLite module,
+ * which nothing else can open. The packed IDs are decoded both ways round (little- and big-endian),
+ * keeping the reading whose IDs actually exist in the item table.
+ *
  * iPhone OS 1–2 (iTunesDB) is handled in ITunesDb.parsePlaylists.
  */
 data class Playlist(val name: String, val itemPids: List<Long>, val smart: Boolean = false)
@@ -39,7 +44,12 @@ object Playlists {
         if (keep.isEmpty()) return emptyList()
 
         val items = HashMap<Long, MutableList<Long>>()
+        val ic0 = if ("container_items" in tables) db.columns("container_items") else emptyList()
         when {
+            "container_items" in tables && "item_pid" !in ic0 && "container_pid" in ic0 -> {
+                packedItems(db, ic0).forEach { (c, list) -> items.getOrPut(c) { ArrayList() } += list }
+                emptyList()
+            }
             "container_items" in tables -> {
                 val ic = db.columns("container_items")
                 val order = listOf("position", "physical_order", "ROWID").first { it == "ROWID" || it in ic }
@@ -58,6 +68,33 @@ object Playlists {
         }
         return keep.map { (c, smart) -> Playlist(c.name, items[c.pid].orEmpty(), smart) }
             .sortedBy { it.name.lowercase() }
+    }
+
+    /** iOS 5/6: container_pid → its item IDs, from whichever container_items column holds packed 64-bit IDs. */
+    private fun packedItems(db: SqlDb, cols: Collection<String>): Map<Long, List<Long>> {
+        val known = if ("item" in db.tables()) db.query("SELECT item_pid FROM item").mapNotNull { (it[0] as? Number)?.toLong() }.toHashSet() else hashSetOf()
+        val order = if ("position" in cols) "position" else "ROWID"
+        for (col in cols.filter { it != "container_pid" }) {
+            val rows = db.query("SELECT container_pid, \"$col\" FROM container_items ORDER BY container_pid, $order")
+            if (rows.none { it[1] is ByteArray }) continue
+            fun decode(le: Boolean): Map<Long, List<Long>> {
+                val out = LinkedHashMap<Long, MutableList<Long>>()
+                for (r in rows) {
+                    val c = (r[0] as? Number)?.toLong() ?: continue
+                    val b = r[1] as? ByteArray ?: continue
+                    val bb = java.nio.ByteBuffer.wrap(b).order(if (le) java.nio.ByteOrder.LITTLE_ENDIAN else java.nio.ByteOrder.BIG_ENDIAN)
+                    val list = out.getOrPut(c) { ArrayList() }
+                    while (bb.remaining() >= 8) list += bb.long
+                }
+                return out
+            }
+            val le = decode(true)
+            val be = decode(false)
+            fun hits(m: Map<Long, List<Long>>) = m.values.sumOf { l -> l.count { it in known } }
+            val best = if (hits(be) > hits(le)) be else le
+            if (known.isEmpty() || hits(best) > 0) return best
+        }
+        return emptyMap()
     }
 
     /**

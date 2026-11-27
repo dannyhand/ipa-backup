@@ -486,7 +486,7 @@ internal fun MainActivity.showUninstallPicker(device: UsbDevice, apps: List<Inst
     val checked = BooleanArray(apps.size)
     MaterialAlertDialogBuilder(this)
         .setTitle("Uninstall which apps? (✓ = backed up)")
-        .setMultiChoiceItems(labels.toTypedArray(), checked) { _, i, on -> checked[i] = on }
+        .setView(checkList(labels, checked, 0.6))
         .setPositiveButton("Uninstall") { _, _ ->
             val chosen = apps.filterIndexed { i, _ -> checked[i] }
             if (chosen.isEmpty()) return@setPositiveButton
