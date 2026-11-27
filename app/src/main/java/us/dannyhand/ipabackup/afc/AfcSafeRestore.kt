@@ -54,6 +54,33 @@ object AfcSafeRestore {
             for (t in targets) runCatching { afc.remove(t + NEW_SUFFIX) }
             throw e
         }
+        return Result(targets.size, swap(afc, targets, retire))
+    }
+
+    /** The same, for files given directly: device path → contents. Written in order, then swapped in together. */
+    fun replaceFiles(
+        afc: AfcClient,
+        files: List<Pair<String, () -> InputStream>>,
+        retire: List<String> = emptyList(),
+        onFile: (String) -> Unit = {},
+    ): Result {
+        val targets = ArrayList<String>()
+        try {
+            for ((target, open) in files) {
+                afc.makeDir(target.substringBeforeLast('/'))
+                targets += target
+                open().use { afc.writeFile(target + NEW_SUFFIX, it) }
+                onFile(target)
+            }
+        } catch (e: Exception) {
+            for (t in targets) runCatching { afc.remove(t + NEW_SUFFIX) }
+            throw e
+        }
+        return Result(targets.size, swap(afc, targets, retire))
+    }
+
+    /** Step 2: current files to .backup, new ones into place. Returns how many existing files were replaced. */
+    private fun swap(afc: AfcClient, targets: List<String>, retire: List<String>): Int {
         fun exists(p: String) = runCatching { afc.fileInfo(p) }.isSuccess
         fun moveAside(p: String): Boolean {
             if (!exists(p)) return false
@@ -67,6 +94,6 @@ object AfcSafeRestore {
             if (moveAside(t)) replaced++
             afc.rename(t + NEW_SUFFIX, t)
         }
-        return Result(targets.size, replaced)
+        return replaced
     }
 }

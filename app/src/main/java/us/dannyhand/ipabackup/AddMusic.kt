@@ -335,6 +335,11 @@ internal fun MainActivity.showSongReview(device: UsbDevice?, staged: List<Staged
         .setTitle("Add ${kind.plural.lowercase()}")
         .setView(body)
         .setPositiveButton("Add to device") { _, _ ->
+            val toAdd = staged.filter { it.candidate.status == SongImport.Status.READY && it.candidate.info != null }
+            if (device != null && kind == SongImport.AddKind.MUSIC && toAdd.isNotEmpty()) {
+                confirmAddSongs(device, toAdd)
+                return@setPositiveButton
+            }
             MaterialAlertDialogBuilder(this)
                 .setTitle("Almost there")
                 .setMessage(if (kind == SongImport.AddKind.RINGTONE)
@@ -347,4 +352,128 @@ internal fun MainActivity.showSongReview(device: UsbDevice?, staged: List<Staged
         }
         .setNegativeButton("Close", null)
         .show()
+}
+
+
+// ------------------------------------------------------------------ writing songs into the library
+
+/** The library rows for a staged song, or null if something essential is unknown (e.g. no duration). */
+internal fun songRow(st: StagedSong, devicePath: String): us.dannyhand.ipabackup.music.LibraryWriter.Song? {
+    val i = st.candidate.info ?: return null
+    val format = when (i.format) {
+        AudioInfo.Format.MP3 -> us.dannyhand.ipabackup.music.LibraryWriter.Format.MP3
+        AudioInfo.Format.AAC -> us.dannyhand.ipabackup.music.LibraryWriter.Format.AAC
+        AudioInfo.Format.ALAC -> us.dannyhand.ipabackup.music.LibraryWriter.Format.ALAC
+        else -> return null
+    }
+    if (i.durationMs <= 0) return null
+    val folder = devicePath.substringBeforeLast('/').substringAfterLast('/')
+    return us.dannyhand.ipabackup.music.LibraryWriter.Song(
+        // Missing tags are stored empty (the Music app shows "Unknown Artist" / "Unknown Album"), titles fall back to the file name.
+        title = st.candidate.title,
+        artist = i.artist ?: i.albumArtist ?: "",
+        albumArtist = i.albumArtist,
+        album = i.album ?: "",
+        genre = i.genre, composer = i.composer, year = i.year,
+        track = i.track, trackCount = i.trackCount, disc = i.disc, discCount = i.discCount,
+        durationMs = i.durationMs, sampleRate = if (i.sampleRate > 0) i.sampleRate else 44100, bitRateKbps = i.bitrateKbps,
+        fileSize = st.file.length(), folder = folder, fileName = devicePath.substringAfterLast('/'), format = format,
+    )
+}
+
+private fun MainActivity.confirmAddSongs(device: UsbDevice, songs: List<StagedSong>) {
+    val pad = (20 * resources.displayMetrics.density).toInt()
+    val backup = MaterialCheckBox(this).apply {
+        text = "Back up the music library first (recommended)"
+        isChecked = true
+    }
+    val restart = MaterialCheckBox(this).apply { text = "Restart the device afterwards (so Music sees them)"; isChecked = true }
+    val body = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(pad, pad / 2, pad, 0)
+        addView(TextView(this@confirmAddSongs).apply {
+            textSize = 14f
+            text = "Adds ${songs.size} song${if (songs.size == 1) "" else "s"} (${humanSize(songs.sumOf { it.file.length() })}) to the device's Music library: " +
+                "copies the files into iTunes_Control/Music and writes them into MediaLibrary.sqlitedb the way iTunes does.\n\n" +
+                "This is new and only tested on a copy of a real library so far. Start with one or two songs. If anything goes wrong, " +
+                "Tools › Music library › Restore puts the library back from the backup.\n\nClose the Music app on the device first."
+        })
+        addView(backup)
+        addView(restart)
+    }
+    MaterialAlertDialogBuilder(this)
+        .setTitle("Add to the Music library?")
+        .setView(android.widget.ScrollView(this).apply { addView(body) })
+        .setPositiveButton("Add") { _, _ -> runAddSongs(device, songs, backup.isChecked, restart.isChecked) }
+        .setNegativeButton("Cancel", null)
+        .show()
+}
+
+private fun MainActivity.runAddSongs(device: UsbDevice, songs: List<StagedSong>, backupFirst: Boolean, restart: Boolean) {
+    log("\nAdding ${songs.size} song(s) to the music library…")
+    runOnDevice(device) { mux, lockdown ->
+        var addedCount = 0
+        withService(mux, lockdown, AfcClient.SERVICE) { s ->
+            val afc = AfcClient(s)
+            if (backupFirst) {
+                log("Backing up the music library database first…")
+                zipMusicLibrary(afc, lockdown.deviceName, artwork = false, label = " (before adding songs)")
+            }
+            val dbPath = "$LIB_DIR/MediaLibrary.sqlitedb"
+            val size = runCatching { afc.stat(dbPath).size }.getOrDefault(0L)
+            log("Copying the library database (${humanSize(size)})…")
+            val dbFile = copySqlite(afc, dbPath, "addsongs") ?: throw IOException("Can't read MediaLibrary.sqlitedb")
+
+            // Where each file goes, checked against what's on the device right now.
+            val folders = HashMap<String, MutableSet<String>>()
+            for (f in runCatching { afc.readDir(SongImport.MUSIC_DIR) }.getOrDefault(emptyList()).filter(SongImport::isMusicFolder))
+                folders[f] = runCatching { afc.readDir("${SongImport.MUSIC_DIR}/$f") }.getOrDefault(emptyList()).toHashSet()
+            val plan = songs.mapNotNull { st ->
+                val ext = st.candidate.ext.let { if (it == "aif") "aiff" else it }
+                val path = SongImport.planPath(ext, folders)
+                val row = songRow(st, path)
+                if (row == null) { log("  skipped ${st.candidate.title}: no duration or unsupported format"); null } else Triple(st, path, row)
+            }
+            if (plan.isEmpty()) { log("Nothing to add."); return@withService }
+
+            // Write the rows into our copy, all or nothing.
+            log("Writing ${plan.size} song(s) into the library…")
+            val flags = android.database.sqlite.SQLiteDatabase.OPEN_READWRITE or android.database.sqlite.SQLiteDatabase.NO_LOCALIZED_COLLATORS or
+                android.database.sqlite.SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING
+            android.database.sqlite.SQLiteDatabase.openDatabase(dbFile.path, null, flags).use { sdb ->
+                sdb.beginTransaction()
+                try {
+                    val w = us.dannyhand.ipabackup.music.LibraryWriter(us.dannyhand.ipabackup.music.AndroidSqlDb(sdb))
+                    for ((st, path, row) in plan) {
+                        w.addSong(row)
+                        log("  ${row.artist.ifEmpty { "Unknown Artist" }} - ${row.title} → ${path.removePrefix("/iTunes_Control/Music/")}")
+                    }
+                    if (w.created.isNotEmpty()) log("  new: " + w.created.joinToString("; "))
+                    sdb.setTransactionSuccessful()
+                } finally {
+                    sdb.endTransaction()
+                }
+                sdb.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { it.moveToFirst() }
+                val check = sdb.rawQuery("PRAGMA integrity_check", null).use { c -> if (c.moveToFirst()) c.getString(0) else "?" }
+                if (check != "ok") throw IOException("The edited library failed SQLite's integrity check ($check); nothing was changed on the device")
+            }
+            // The edit is fully in the main file now; side files from the copy aren't needed.
+            java.io.File(dbFile.path + "-wal").delete(); java.io.File(dbFile.path + "-shm").delete()
+
+            // Songs first, then the database, each written under a temporary name and swapped in only when complete.
+            log("Copying the song files…")
+            AfcSafeRestore.replaceFiles(afc, plan.map { (st, path, _) -> path to { st.file.inputStream() } }) { log("  ${it.substringAfterLast('/')} ✓") }
+            log("Swapping in the updated library (the old one is kept on the device as MediaLibrary.sqlitedb.backup)…")
+            AfcSafeRestore.replaceFiles(afc, listOf(dbPath to { dbFile.inputStream() }), retire = listOf("$dbPath-wal", "$dbPath-shm"))
+            dbFile.parentFile?.deleteRecursively()
+            addedCount = plan.size
+        }
+        if (addedCount == 0) return@runOnDevice
+        log("Added $addedCount song(s) ✓")
+        if (restart) {
+            runCatching { withService(mux, lockdown, us.dannyhand.ipabackup.diag.DiagnosticsRelay.SERVICE) { us.dannyhand.ipabackup.diag.DiagnosticsRelay(it).restart() } }
+                .onSuccess { log("Restarting the device. Open Music once it's back and look for the new songs.") }
+                .onFailure { log("Couldn't restart (${it.message}); restart the device before opening Music.") }
+        } else log("Restart the device before opening Music.")
+    }
 }

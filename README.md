@@ -76,10 +76,10 @@ iTunes and iBooks are trademarks of Apple Inc.
 - **Books:** iBooks EPUBs (repackaged into valid `.epub` files) and PDFs, named `Author - Title`
 - **Synced Videos:** movies, TV shows and music videos; **Other Audio:** podcasts, audiobooks, iTunes U and
   ringtones. Each saved to its own folder with readable names
-- **Adding media (in progress):** pick songs, podcasts, audiobooks, movies, TV shows, music videos or ringtones
-  on the phone; the app reads their tags, checks the format (and for videos, whether the connected device can
-  play them), spots ones already on the device and plans where they go. Writing them into the device's
-  library is the next step
+- **Adding songs (experimental, iOS 5+):** pick MP3/M4A files on the phone; the app reads their tags, skips
+  duplicates, copies them into `iTunes_Control/Music` and writes them into MediaLibrary.sqlitedb the way iTunes
+  does (with sort order worked out from a real iOS 6 library), after backing up the library. Podcasts,
+  audiobooks, videos and ringtones are checked and planned but not written yet
 - **Contacts, Notes, Bookmarks & Calendars** (jailbroken devices with AFC2): contacts as `.vcf`, notes as
   HTML plus a zip of text files, bookmarks and Reading List as a browser-importable HTML file, and one
   `.ics` per calendar
