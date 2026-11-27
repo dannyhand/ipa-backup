@@ -147,7 +147,8 @@ import us.dannyhand.ipabackup.MainActivity.Leftover
  *  - iOS 5 and later: MediaLibrary.sqlitedb, with its -wal and -shm files (SQLite's write-ahead log:
  *    recent changes may only be in the -wal file, so the three must be copied and restored together)
  * The whole folder is zipped, so whichever format is there (plus play counts and iTunes' prefs) is kept.
- * Artwork (/iTunes_Control/Artwork, the cover thumbnails) is optional because it can be large.
+ * Artwork is optional because it can be large: /iTunes_Control/Artwork (ArtworkDB) and
+ * /iTunes_Control/iTunes/Artwork (the cover images, hundreds of MB on a big library).
  */
 internal fun MainActivity.startMusicLibraryBackup(device: UsbDevice) {
     log("\nLooking at the music library database…")
@@ -166,12 +167,13 @@ internal fun MainActivity.startMusicLibraryBackup(device: UsbDevice) {
                 if ("iTunesCDB" in names) add("iTunesCDB (iPhone OS 1–2)")
                 if ("iTunesDB" in names) add("iTunesDB (iPhone OS 1–2)")
             }
-            libSize = runCatching { afc.measureTree(LIB_DIR).bytes }.getOrDefault(0L)
-            biggest = names.mapNotNull { n ->
+            artSize = ART_DIRS.sumOf { d -> runCatching { afc.measureTree(d).bytes }.getOrDefault(0L) }
+            val innerArt = runCatching { afc.measureTree(LIB_ART_DIR).bytes }.getOrDefault(0L)
+            libSize = runCatching { afc.measureTree(LIB_DIR).bytes }.getOrDefault(0L) - innerArt
+            biggest = names.filter { it != "Artwork" }.mapNotNull { n ->
                 val p = "$LIB_DIR/$n"
                 runCatching { afc.stat(p) }.getOrNull()?.let { e -> n to (if (e.isDir) runCatching { afc.measureTree(p).bytes }.getOrDefault(0L) else e.size) }
             }.sortedByDescending { it.second }.take(6)
-            artSize = runCatching { afc.measureTree(ART_DIR).bytes }.getOrDefault(0L)
             ok = true
         }
     }
@@ -191,7 +193,7 @@ internal fun MainActivity.showMusicLibraryDialog(device: UsbDevice, found: List<
         addView(TextView(this@showMusicLibraryDialog).apply {
             text = (if (found.isEmpty()) "No music library database found." else "Found:\n" + found.joinToString("\n") { "• $it" }) +
                 (if (found.size > 1) "\n(Several formats side by side is normal: iTunes keeps writing the older ones too.)" else "") +
-                "\n\nLibrary folder: ${humanSize(libSize)}. Only the database is saved, not the songs themselves." +
+                "\n\nLibrary database files: ${humanSize(libSize)}. The songs themselves aren't saved." +
                 (if (biggest.isNotEmpty()) "\nLargest items:\n" + biggest.joinToString("\n") { "• ${it.first}: ${humanSize(it.second)}" } else "") +
                 "\n\nSaved to Download/IPA Backup/$MUSICLIB_SUBFOLDER."
             textSize = 14f
@@ -261,10 +263,11 @@ internal fun MainActivity.zipMusicLibrary(afc: AfcClient, owner: String, artwork
         val zos = java.util.zip.ZipOutputStream(java.io.BufferedOutputStream(t.stream, 1 shl 16))
         val z = AfcZipper(afc, zos)
         z.addStoredBytes(("Music library database backup made by IPA Backup on $stamp from $owner.\n" +
-            "iTunes_Control/iTunes holds the library database; iTunes_Control/Artwork the cover art.\n" +
+            "iTunes_Control/iTunes holds the library database; iTunes_Control/Artwork and iTunes_Control/iTunes/Artwork the cover art (if included).\n" +
             "The songs themselves (iTunes_Control/Music) are not included.\n" +
             "Restore it with Tools › Music library › Restore.\n").toByteArray(), "README.txt")
-        z.addTree(LIB_DIR, LIB_DIR.trimStart('/') + "/")
+        // The cover images live inside the library folder on iOS 6; leave them out unless artwork was asked for.
+        z.addTree(LIB_DIR, LIB_DIR.trimStart('/') + "/") { name -> artwork || name != "Artwork" }
         if (artwork && runCatching { afc.stat(ART_DIR) }.isSuccess) z.addTree(ART_DIR, ART_DIR.trimStart('/') + "/")
         zos.finish()
         zos.flush()
@@ -295,8 +298,8 @@ internal fun MainActivity.confirmMusicLibraryRestore(device: UsbDevice, uri: and
         setPadding(pad, pad / 2, pad, 0)
         addView(TextView(this@confirmMusicLibraryRestore).apply {
             textSize = 14f
-            text = "Puts back the library database from this backup (${libFiles.size} files" +
-                (if (names.any { it.startsWith(ART_DIR.trimStart('/') + "/") }) ", with artwork" else "") + ").\n\n" +
+            text = "Puts back the library database from this backup (${libFiles.count { !isArtworkEntry(it) }} database files" +
+                (if (names.any(::isArtworkEntry)) ", with artwork" else "") + ").\n\n" +
                 "Songs added since the backup will be missing from the Music app (their files stay on the device), " +
                 "and play counts go back to the backup's.\n\nThe current library is backed up first, so this can be undone. " +
                 "Close the Music app before restoring."
@@ -317,7 +320,7 @@ internal fun MainActivity.runMusicLibraryRestore(device: UsbDevice, uri: android
         withService(mux, lockdown, AfcClient.SERVICE) { s ->
             val afc = AfcClient(s)
             log("Backing up the current library first…")
-            zipMusicLibrary(afc, lockdown.deviceName, artwork = zipNames.any { it.startsWith(ART_DIR.trimStart('/') + "/") }, label = " (before restore)")
+            zipMusicLibrary(afc, lockdown.deviceName, artwork = zipNames.any(::isArtworkEntry), label = " (before restore)")
             // SQLite side files that aren't in the backup belong to the current database: left in place they'd be
             // replayed onto the restored one and corrupt it, so they're moved aside (to .backup) too.
             val inZip = zipNames.map { "/$it" }.toSet()

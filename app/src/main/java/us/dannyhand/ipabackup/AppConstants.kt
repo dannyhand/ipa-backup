@@ -19,6 +19,11 @@ internal const val PLAYLISTS_SUBFOLDER = "Playlists"
 internal const val MUSICLIB_SUBFOLDER = "Music Library Backups"
 internal const val LIB_DIR = "/iTunes_Control/iTunes"
 internal const val ART_DIR = "/iTunes_Control/Artwork"
+/** The cover images themselves (iOS 6 keeps them here, in 256 subfolders); ART_DIR only holds ArtworkDB. */
+internal const val LIB_ART_DIR = "$LIB_DIR/Artwork"
+internal val ART_DIRS = listOf(ART_DIR, LIB_ART_DIR)
+/** True if a zip entry name is artwork (either artwork folder). */
+internal fun isArtworkEntry(name: String) = ART_DIRS.any { name.startsWith(it.trimStart('/') + "/") }
 /** Name of a book copied in by Books › Add (a 16-hex-digit Persistent ID). */
 internal val BOOK_COPY = Regex("^[0-9A-F]{16}\\.(epub|pdf)$")
 internal const val THUMB_PX = 200
