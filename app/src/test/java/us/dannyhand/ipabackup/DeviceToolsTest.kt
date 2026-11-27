@@ -138,6 +138,18 @@ class HistoryTest {
 }
 
 class DeviceReportTest {
+    @Test fun untrackedGaugeAndRawStorage() {
+        val r = DeviceReport.text(DeviceReport.Input(
+            info = mapOf("ProductType" to "iPod4,1"),
+            disk = mapOf("TotalDataCapacity" to 58_040_000_000L, "TotalDataAvailable" to 11_210_000_000L, "AmountDataReserved" to 209_715_200L, "NANDInfo" to byteArrayOf(1, 2)),
+            battery = null, gasGauge = mapOf("CycleCount" to 0L, "DesignCapacity" to 930L, "FullChargeCapacity" to 930L),
+            powerSource = null, jailbreak = "no", deviceTime = null,
+        ))
+        assertTrue(r, r.contains("Health                  unknown"))
+        assertTrue(r, r.contains("  " + "AmountDataReserved".padEnd(22) + "200.0 MB (209715200)"))
+        assertTrue(r.contains("  " + "NANDInfo".padEnd(22) + "2 bytes of data"))
+    }
+
     @Test fun formatsReport() {
         val r = DeviceReport.text(DeviceReport.Input(
             info = mapOf("DeviceName" to "Danny's iPod", "ProductType" to "iPod4,1", "HardwareModel" to "N81AP",
@@ -153,6 +165,7 @@ class DeviceReportTest {
         assertTrue(r.contains("6.1.6 (10B500)"))
         assertTrue(r.contains("Cycle count             512"))
         assertTrue(r.contains("80% of design capacity"))
+        assertTrue(r.contains("Other storage values") == false)
         assertTrue(r.contains("87%"))
         assertTrue(r.contains("⚠ wrong date"))
         assertTrue(r.contains("27.94 GB, 9.31 GB free"))

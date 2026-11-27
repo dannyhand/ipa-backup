@@ -184,8 +184,9 @@ internal fun MainActivity.startFullBackup(device: UsbDevice) {
         val disk = lockdown.value(null, "com.apple.disk_usage") as? Map<*, *>
         // Backups leave out apps, music and videos (iTunes re-syncs those), so count what's left of the data partition.
         fun n(k: String) = (disk?.get(k) as? Number)?.toLong() ?: 0L
-        if (disk != null) used = (n("TotalDataCapacity") - n("TotalDataAvailable") - n("MobileApplicationUsage") -
-            n("MusicUsage").coerceAtLeast(0)).coerceAtLeast(0)
+        // Only when the device reports app and music usage; otherwise "used" is mostly music, which isn't backed up.
+        if (disk != null && disk["MobileApplicationUsage"] is Number && disk["MusicUsage"] is Number)
+            used = (n("TotalDataCapacity") - n("TotalDataAvailable") - n("MobileApplicationUsage") - n("MusicUsage")).coerceAtLeast(0)
         if (udid == null) log("Couldn't read the device's ID.")
     }
 }

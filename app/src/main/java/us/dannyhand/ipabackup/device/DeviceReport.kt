@@ -83,6 +83,21 @@ object DeviceReport {
             line("Camera roll", num(disk["CameraUsage"])?.let(::size))
             line("Photos (synced)", num(disk["PhotoUsage"])?.let(::size))
             line("Voice memos", num(disk["VoiceMemoUsage"])?.let(::size))
+            // Everything the device reported, by its own names (they differ between iOS versions).
+            val known = setOf("TotalDiskCapacity", "TotalDataCapacity", "TotalDataAvailable", "AmountDataAvailable",
+                "TotalSystemCapacity", "TotalSystemAvailable", "MobileApplicationUsage", "CameraUsage", "PhotoUsage", "VoiceMemoUsage")
+            val rest = disk.entries.filter { it.key !in known }.sortedBy { it.key.toString() }
+            if (rest.isNotEmpty()) {
+                append("\nOther storage values reported:\n")
+                for ((k, v) in rest) {
+                    val shown = when (v) {
+                        is Number -> if (v.toLong() > 4096) "${size(v.toLong())} (${v})" else v.toString()
+                        is ByteArray -> "${v.size} bytes of data"
+                        else -> v.toString().take(60)
+                    }
+                    line("  $k", shown)
+                }
+            }
         }
 
         section("Battery")
@@ -98,7 +113,13 @@ object DeviceReport {
         line("Cycle count", cycles)
         if (design != null) line("Design capacity", "$design mAh")
         if (full != null) line("Full-charge capacity", "$full mAh")
-        if (design != null && full != null && design > 0) line("Health", "%d%% of design capacity".format(full * 100 / design))
+        if (design != null && full != null && design > 0) {
+            // A gauge that doesn't track wear reports 0 cycles and exactly the design capacity forever.
+            if ((cycles == null || cycles == 0L) && full == design)
+                line("Health", "unknown (the device reports 0 cycles and full design capacity; its battery gauge " +
+                    "likely doesn't track wear, unless the battery is new)")
+            else line("Health", "%d%% of design capacity".format(full * 100 / design))
+        }
         num(p?.get("Temperature"))?.let { line("Temperature", "%.1f °C".format(it / 100.0)) }
         num(g?.get("Voltage") ?: p?.get("Voltage"))?.let { line("Voltage", "%.2f V".format(it / 1000.0)) }
         if (cycles == null && design == null) append("(cycle count and capacity aren't reported by this iOS version)\n")
